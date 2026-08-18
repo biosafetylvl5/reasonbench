@@ -1,0 +1,113 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reasonbench"
+version = "0.1.0"
+description = "Evaluate LLM reasoning traces and outputs against a rubric, via OpenRouter"
+authors = [{ name = "Gwyn Uttmark", email = "biosafetylevel5@gmail.com" }]
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+]
+
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reasonbench"]
+
+## RUFF
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "N", "D", "UP", "B", "C4", "SIM", "ARG",
+    "ERA", "PL", "RUF", "TC", "S", "A", "COM", "PT", "PTH", "TRY",
+]
+
+ignore = [
+    "D203",    # conflicts with D211
+    "D212",    # conflicts with D213
+    "D105",    # magic methods
+    "E731",    # allow variable assigned lambdas (PLEASE!!)
+    "COM812",  # conflicts with the formatter
+    "TRY003",  # too noisy here
+]
+
+fixable = ["ALL"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves these at runtime, so ruff must not move them into TYPE_CHECKING.
+runtime-evaluated-base-classes = [
+    "pydantic.BaseModel",
+    "pydantic_settings.BaseSettings",
+    "reasonbench.config.Frozen",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["S101", "D103", "D100", "PLR2004"]
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+markers = [
+    "integration: hits the real OpenRouter API (needs OPENROUTER_API_KEY)",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "**/__init__.py"]
