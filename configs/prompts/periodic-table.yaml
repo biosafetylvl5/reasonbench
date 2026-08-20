@@ -1,0 +1,185 @@
+# A multiple-choice chemistry item whose distractors map onto distinct
+# reasoning failures, so a model can reach the right letter for the wrong
+# reason. That is exactly what grading the trace separately is meant to catch.
+version: 1
+id: periodic-group-similarity
+title: "Group similarity: lithium and sodium"
+
+system: |
+  You are a chemistry tutor. Be accurate and brief.
+
+variables:
+  element_a: lithium
+  element_b: sodium
+
+variants:
+  - id: plain
+    user: |
+      {{ element_a | capitalize }} and {{ element_b }} have similar chemical
+      properties. For example, both can form ionic bonds with chloride. Which
+      of the following best explains this similarity?
+
+        A. Both lithium and sodium ions are positively charged.
+        B. Lithium and sodium are in the same group of the Periodic Table.
+        C. Lithium and sodium are in the same period of the Periodic Table.
+        D. Both lithium and sodium have low atomic weights.
+
+      Respond with a single letter.
+
+  - id: cot
+    user: |
+      {{ element_a | capitalize }} and {{ element_b }} have similar chemical
+      properties. For example, both can form ionic bonds with chloride. Which
+      of the following best explains this similarity?
+
+        A. Both lithium and sodium ions are positively charged.
+        B. Lithium and sodium are in the same group of the Periodic Table.
+        C. Lithium and sodium are in the same period of the Periodic Table.
+        D. Both lithium and sodium have low atomic weights.
+
+      Work through the options one at a time, then give your final answer as a
+      single letter on the last line.
+
+# Attachments are resolved relative to this file and inlined as data URLs.
+# Images become `image_url` content parts; PDFs become `file` parts.
+# attachments:
+#   - id: periodic_table
+#     path: assets/periodic-table.png
+#     media_type: image/png
+#     attach_to: all          # or a list of variant ids
+
+rubric:
+  # Framing prepended to the judge's system message for every judged criterion.
+  judge_instructions: |
+    You are grading responses to a secondary-school chemistry question about
+    periodic trends. The correct answer is B: lithium and sodium are in the
+    same group (Group 1, the alkali metals), so both have a single valence
+    electron and both lose it to form a 1+ ion.
+
+    Each distractor encodes a specific error:
+      A is circular. Both ions being positive restates the shared
+        behaviour, not an explanation of it.
+      C is factually false. Lithium is in period 2 and sodium in period 3.
+      D is an irrelevant correlate. Low atomic weight does not determine
+        bonding behaviour (beryllium is light and behaves quite differently).
+
+    Grade what is actually written. Do not credit a correct final letter when
+    the stated reasoning is wrong, and do not penalize informal phrasing that
+    nonetheless expresses the right chemistry.
+
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      # Both variants ask for the answer on the last line. Reading only that
+      # line stops a match on an option the model merely enumerated aloud.
+      scope: last_line
+      weight: 3.0
+      check:
+        type: regex
+        pattern: '(?i)^(?:\W*answer\W*)?\W*B\b'
+
+    - id: follows_answer_format
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 0.5
+      check:
+        # The last line is a bare option letter, as both variants instruct.
+        type: regex
+        pattern: '(?i)^\W*[A-D]\W*$'
+
+    - id: explains_via_valence_electrons
+      kind: judge
+      target: reasoning
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the reasoning derive the similarity from shared group membership
+          and the single valence electron that follows from it, rather than
+          asserting the answer or pattern-matching on the phrase "same group"?
+        levels:
+          4: >
+            States the full causal chain: same group means the same number of
+            valence electrons (one), which is why both readily lose it to form
+            a 1+ ion and bond ionically with chloride.
+          3: >
+            Correctly links group membership to valence electrons or to
+            outer-shell configuration, but stops short of connecting that to
+            the observed ionic bonding.
+          2: >
+            Identifies group membership as the reason but never mentions
+            electrons or electronic structure; essentially restates option B.
+          1: >
+            Arrives at group membership only by eliminating other options, with
+            no positive account of why being in a group matters.
+          0: >
+            No engagement with periodic structure, or the stated mechanism is
+            wrong (for example attributing the similarity to atomic mass,
+            ionic charge alone, or being in the same period).
+        positive_indicators:
+          - "names the valence or outermost electron count (one)"
+          - "identifies Group 1 or the alkali metals explicitly"
+          - "connects losing one electron to forming a 1+ cation"
+          - "links the electron configuration to bonding with chloride"
+        negative_indicators:
+          - "asserts B is correct without saying why group membership matters"
+          - "confuses group (column) with period (row)"
+          - "explains the similarity by atomic weight or size alone"
+          - "treats the shared positive charge as the cause rather than the effect"
+        notes: >
+          Reasoning that reaches the right chemistry through informal wording
+          ("same column so same outer electron") should score at least 3. Judge
+          the chemistry, not the vocabulary.
+
+    - id: rejects_distractors
+      kind: judge
+      target: both
+      weight: 1.5
+      scale: [0, 3]
+      guidance:
+        summary: >
+          Does the response actively rule out the wrong options, rather than
+          only selecting the right one?
+        levels:
+          3: >
+            Rejects two or more distractors, each for the right reason.
+          2: >
+            Rejects one distractor for the right reason.
+          1: >
+            Waves the other options away, or the reason offered is shaky.
+          0: >
+            Says nothing about the alternatives, or accepts one as also right.
+        positive_indicators:
+          - "notes that lithium and sodium are in different periods, so C is false"
+          - "notes that A restates the shared behaviour instead of explaining it"
+          - "notes that atomic weight does not determine bonding behaviour"
+        negative_indicators:
+          - "claims C is true or partially true"
+          - "calls A equally valid"
+        notes: >
+          The terse variant answers with a single letter, so a bare correct
+          answer scores 0 here. That is not a defect of the model.
+
+    - id: factually_sound
+      kind: judge
+      target: both
+      weight: 1.0
+      scale: [0, 2]
+      guidance:
+        summary: >
+          Is everything asserted about these elements chemically accurate?
+        levels:
+          2: "Every chemical claim made is correct."
+          1: "Mostly correct, with one minor imprecision that does not mislead."
+          0: "Contains a clear factual error about periodicity, charge, or bonding."
+        negative_indicators:
+          - "places lithium and sodium in the same period"
+          - "gives the wrong ionic charge for an alkali metal"
+          - "describes lithium chloride or sodium chloride as covalent"
+          - "misstates the number of valence electrons"
+        notes: >
+          Judge only claims the response actually makes. A short answer that
+          asserts nothing beyond the chosen letter has made no false claim and
+          should score 2.

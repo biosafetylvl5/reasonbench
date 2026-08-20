@@ -1,0 +1,24 @@
+version: 1
+
+models:
+  - google/gemma-4-31b-it
+  - meta-llama/llama-3.3-70b-instruct   # no reasoning support; control case
+
+sweep:
+  repeats: 3
+  temperature: [0.0, 1.0]
+  reasoning_effort: [low, high]
+
+max_tokens: 4000
+max_concurrency: 8
+max_retries: 4
+timeout_s: 180
+budget_usd: 1.00
+
+judge:
+  model: deepseek/deepseek-v4-flash
+  temperature: 0.0
+  repeats: 1
+  blind: true
+  max_chars: 20000
+  parse_retries: 2   # for replies that will not parse; not HTTP retries
