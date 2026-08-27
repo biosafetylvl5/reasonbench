@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from reasonbench.config import PromptSpec, RunConfig
+from reasonbench.sweep import Sample
 
+FIXTURES = Path(__file__).parent / "fixtures"
 CONFIGS = Path(__file__).parent.parent / "configs"
+
+
+def load_fixture(name: str) -> dict[str, Any]:
+    """Load a response fixture by stem."""
+    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -69,3 +78,17 @@ def prompt_spec() -> PromptSpec:
             },
         },
     )
+
+
+def make_sample(**overrides: Any) -> Sample:
+    """Build a Sample with sensible defaults."""
+    defaults = {
+        "sample_id": "abc123",
+        "prompt_id": "p1",
+        "variant_id": "plain",
+        "model": "model/a",
+        "temperature": 0.0,
+        "reasoning_effort": "high",
+        "repeat": 0,
+    }
+    return Sample(**(defaults | overrides))

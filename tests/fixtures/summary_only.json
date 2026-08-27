@@ -1,0 +1,35 @@
+{
+  "id": "gen-summary-only",
+  "model": "openai/gpt-5.2",
+  "provider": "OpenAI",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "B",
+        "reasoning_details": [
+          {
+            "type": "reasoning.summary",
+            "summary": "Considered each option, ruled out period and atomic weight, settled on shared group membership.",
+            "id": "rs_abc123",
+            "format": "openai-responses-v1",
+            "index": 0
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 210,
+    "total_tokens": 330,
+    "completion_tokens_details": {
+      "reasoning_tokens": 192
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "cost": 0.0031
+  }
+}

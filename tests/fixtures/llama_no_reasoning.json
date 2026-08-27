@@ -1,0 +1,26 @@
+{
+  "id": "gen-1755012400-QrStUvWxYzAbCdEf",
+  "provider": "Together",
+  "model": "meta-llama/llama-3.3-70b-instruct",
+  "object": "chat.completion",
+  "created": 1755012400,
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "native_finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "B",
+        "refusal": null
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 118,
+    "completion_tokens": 3,
+    "total_tokens": 121,
+    "prompt_tokens_details": { "cached_tokens": 0 },
+    "cost": 0.0000094
+  }
+}

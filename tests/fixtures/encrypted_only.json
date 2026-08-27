@@ -1,0 +1,35 @@
+{
+  "id": "gen-encrypted-only",
+  "model": "openai/gpt-5.2",
+  "provider": "OpenAI",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "B",
+        "reasoning_details": [
+          {
+            "type": "reasoning.encrypted",
+            "data": "KYrrTK0Ob9AxkvNUtRZ32Dma+1y9Hn/gQaIDZMUmh+hJqgtszS6P8FGyE3TVNpf4WbobfN0+nwBhwiOE5UanCGnKK4ztTq8QcdIzlPVWtxh52juc/V6/IIHiQ6QFZsco",
+            "id": "rs_enc_001",
+            "format": "openai-responses-v1",
+            "index": 0
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 265,
+    "total_tokens": 385,
+    "completion_tokens_details": {
+      "reasoning_tokens": 256
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "cost": 0.0042
+  }
+}
