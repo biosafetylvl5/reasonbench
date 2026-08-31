@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from reasonbench.config import PromptSpec, RunConfig
+from reasonbench.storage import SampleRow
 from reasonbench.sweep import Sample
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -92,3 +93,28 @@ def make_sample(**overrides: Any) -> Sample:
         "repeat": 0,
     }
     return Sample(**(defaults | overrides))
+
+
+def make_row(**overrides: Any) -> SampleRow:
+    """Build a SampleRow with sensible defaults."""
+    defaults = {
+        "sample_id": "abc123",
+        "prompt_id": "p1",
+        "variant_id": "plain",
+        "model": "model/a",
+        "temperature": 0.0,
+        "reasoning_effort": "high",
+        "repeat": 0,
+        "ok": True,
+        "output": "7",
+        "reasoning_availability": "full_text",
+        "reasoning_text": "Seven is seven.",
+        "reasoning_summary": "",
+        "reasoning_tokens": 12,
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "total_tokens": 30,
+        "cost": 0.001,
+        "latency_s": 1.0,
+    }
+    return SampleRow(**(defaults | overrides))
