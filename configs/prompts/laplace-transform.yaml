@@ -1,0 +1,155 @@
+# A conceptual maths item whose distractors separate *mechanism* from *purpose*.
+# D names what the transform physically is (an integral); C names a step that
+# happens downstream of the inverse transform. A model can pick B by keyword
+# association without understanding either, which is what the reasoning
+# criteria are here to detect.
+version: 1
+id: laplace-transform-purpose
+title: "Purpose of the Laplace transform"
+
+system: |
+  Answer as an engineering mathematics tutor would. Keep it short.
+
+variants:
+  - id: plain
+    user: |
+      What is the primary purpose of the Laplace Transform in differential
+      equations?
+
+        A. To find eigenvalues
+        B. To convert differential equations into algebraic equations
+        C. To simplify partial fractions
+        D. To compute integrals directly
+
+      Respond with a single letter.
+
+  - id: cot
+    user: |
+      What is the primary purpose of the Laplace Transform in differential
+      equations?
+
+        A. To find eigenvalues
+        B. To convert differential equations into algebraic equations
+        C. To simplify partial fractions
+        D. To compute integrals directly
+
+      Work through the options one at a time, then give your final answer as a
+      single letter on the last line.
+
+rubric:
+  judge_instructions: |
+    You are grading responses to an undergraduate question about the Laplace
+    transform. The correct answer is B. The transform maps a function of time
+    to a function of the complex variable s, and because it turns
+    differentiation into multiplication by s (L{f'} = sF(s) - f(0)), an
+    ordinary differential equation in t becomes an algebraic equation in s.
+    That algebraic equation is solved, then inverted back to the time domain.
+
+    Each distractor encodes a specific misunderstanding:
+      A confuses transform methods with matrix or characteristic-equation
+        methods; eigenvalues belong to a different technique.
+      C reverses a relationship. Partial fractions are a step performed
+        *during the inverse transform*, so they are a consequence of using the
+        method, not its purpose.
+      D mistakes mechanism for purpose. The transform is defined by an
+        integral, but computing integrals is not what it is for.
+
+    Grade the reasoning as written. A correct letter reached by wrong
+    reasoning earns nothing. Notation is not required if the idea is right.
+
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 4.0
+      check:
+        type: regex
+        pattern: '(?i)\bB\b'
+
+    - id: follows_answer_format
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 0.5
+      check:
+        type: regex
+        pattern: '(?i)^\W*[A-D]\W*$'
+
+    - id: explains_domain_transformation
+      kind: judge
+      target: reasoning
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the reasoning explain *why* the transform algebraizes an ODE --
+          that differentiation in the time domain becomes multiplication by s
+          in the s-domain, rather than merely asserting that it does?
+        levels:
+          4: >
+            States the mechanism explicitly: differentiation maps to
+            multiplication by s (optionally citing L{f'} = sF(s) - f(0)), so an
+            ODE in t becomes an algebraic equation in s, and notes that the
+            solution is transformed back via the inverse transform.
+          3: >
+            Correctly describes the time-domain to s-domain mapping and the
+            resulting algebraic equation, but omits either the derivative rule
+            or the inverse step.
+          2: >
+            Asserts that the transform converts differential equations to
+            algebraic ones without saying how; essentially restates option B.
+          1: >
+            Reaches B mainly by eliminating the other options, with no positive
+            account of what the transform does.
+          0: >
+            No engagement with what the transform does, or the stated mechanism
+            is wrong (for example describing it as a numerical integration
+            technique or an eigenvalue method).
+        positive_indicators:
+          - "says differentiation becomes multiplication by s"
+          - "cites the derivative rule L{f'} = sF(s) - f(0)"
+          - "names the time domain and the s domain (or frequency domain)"
+          - "mentions solving algebraically then inverting back"
+          - "notes that initial conditions are absorbed automatically"
+        negative_indicators:
+          - "describes the transform as a way of evaluating integrals"
+          - "claims it produces eigenvalues or a characteristic polynomial"
+          - "treats partial fractions as the goal rather than a later step"
+          - "asserts B with no mechanism at all"
+        notes: >
+          Informal but correct phrasing ("derivatives turn into powers of s, so
+          the equation becomes ordinary algebra") deserves at least 3. Judge
+          the mathematics, not the notation.
+
+    - id: rejects_distractors
+      kind: judge
+      target: both
+      weight: 1.5
+      scale: [0, 2]
+      guidance:
+        summary: >
+          Does the response rule out the wrong options with correct reasons,
+          particularly the two that are genuinely tempting (C and D)?
+        levels:
+          2: >
+            Rules out at least one distractor with a correct reason, taking C
+            or D on its merits.
+          1: >
+            Mentions other options but dismisses them without a reason, or the
+            reason given is weak.
+          0: >
+            Does not consider the other options, or endorses a distractor as
+            equally correct.
+        positive_indicators:
+          - "identifies partial fractions as a step within the inverse transform"
+          - "distinguishes the transform being an integral from its purpose"
+          - "assigns eigenvalues to matrix or characteristic-equation methods"
+        negative_indicators:
+          - "accepts D because the transform is defined by an integral"
+          - "accepts C because partial fractions appear in worked examples"
+          - "calls two options equally valid"
+        notes: >
+          Rejecting D by observing that the transform is an integral is not a
+          reason. The response has to say why computing integrals is not the
+          purpose.

@@ -1,0 +1,153 @@
+# A radiation heat-transfer item with numbered rather than lettered options,
+# which also exercises the answer-extraction path on digits.
+#
+# Option 3 (Black) is the distractor that matters. A black body is wavelength
+# independent too; it is the case where emissivity equals 1. Grey is the
+# general term.
+version: 1
+id: grey-body-definition
+title: "Wavelength-independent emissivity: grey vs black body"
+
+system: |
+  You teach radiation heat transfer. Answer precisely.
+
+variants:
+  - id: plain
+    user: |
+      The emissivity and absorptivity of a surface are independent of the
+      wavelength. That surface is called:
+
+        1. Grey
+        2. Colour
+        3. Black
+        4. Opaque
+
+      Respond with a single number.
+
+  - id: cot
+    user: |
+      The emissivity and absorptivity of a surface are independent of the
+      wavelength. That surface is called:
+
+        1. Grey
+        2. Colour
+        3. Black
+        4. Opaque
+
+      Work through the options one at a time, then give your final answer as a
+      single number on the last line.
+
+rubric:
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 3.0
+      check:
+        # Accepts the option number or the word itself, in either spelling.
+        type: regex
+        pattern: '(?i)^(?:\W*answer\W*)?\W*(?:1\b|gr[ea]y\b)'
+
+    - id: follows_answer_format
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 0.5
+      check:
+        type: regex
+        pattern: '(?i)^\W*[1-4]\W*$'
+
+    - id: distinguishes_grey_from_black
+      kind: judge
+      target: reasoning
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the reasoning show that it understands *why* grey is the right
+          term rather than black: that grey means emissivity is constant with
+          wavelength at any value, while black is the special case of that
+          constant being 1?
+        levels:
+          4: >
+            States the definition of a grey surface (spectral emissivity and
+            absorptivity constant with respect to wavelength) and explicitly
+            explains that a black body is the limiting case with both equal to
+            1, so Black is too narrow for the definition given.
+          3: >
+            Gives the correct definition of a grey surface and rejects Black,
+            but without clearly articulating that black is a special case of
+            wavelength independence.
+          2: >
+            Identifies grey as the wavelength-independent surface but never
+            engages with why black does not also satisfy the definition.
+          1: >
+            Reaches the answer mainly by eliminating the obviously wrong
+            options (Colour, Opaque), with no positive definition of grey.
+          0: >
+            No engagement with the definition, or the stated reasoning is wrong
+            (for example defining a grey surface by its colour, claiming grey
+            means emissivity of 0.5, or asserting that black bodies vary with
+            wavelength).
+        positive_indicators:
+          - "defines grey as emissivity constant with respect to wavelength"
+          - "states that a black body has emissivity and absorptivity equal to 1"
+          - "identifies black as a special or limiting case of grey"
+          - "notes the constant value is less than unity for a grey surface"
+          - "invokes Kirchhoff's law to link emissivity and absorptivity"
+          - "contrasts grey with a selective surface whose properties vary"
+        negative_indicators:
+          - "treats grey as being about the visible colour of the surface"
+          - "claims a black body's properties do vary with wavelength"
+          - "confuses emissivity with reflectivity or transmissivity"
+          - "asserts the answer with no definition at all"
+        notes: >
+          Informal but correct phrasing ("grey just means the emissivity is the
+          same at every wavelength, whatever its value") deserves at least 3.
+          Judge the physics, not the vocabulary. Do not require the response to
+          mention Kirchhoff's law.
+
+    - id: rejects_distractors
+      kind: judge
+      target: both
+      weight: 1.5
+      scale: [0, 3]
+      guidance:
+        summary: >
+          Is Black set aside for the right reason, and are Colour and Opaque
+          shown to describe different properties?
+        levels:
+          3: >
+            Explains why Black is too narrow, and rules out at least one of
+            Colour or Opaque on the right grounds.
+          2: >
+            Gives a correct reason for setting aside any one distractor.
+          1: >
+            Names other options without saying why they fail, or gives a reason
+            that is partly wrong.
+          0: >
+            Ignores the alternatives, or treats one of them as equally right.
+        positive_indicators:
+          - "explains that opaque means transmissivity is zero, a different property"
+          - "identifies colour as a selective surface, whose properties do vary
+             with wavelength, making it the opposite of what is described"
+          - "explains that black fixes emissivity at 1 and so is too specific"
+        negative_indicators:
+          - "rejects Black on the grounds that black bodies are wavelength dependent"
+          - "calls Black and Grey equally correct"
+          - "rejects Opaque for the wrong reason"
+        notes: >
+          Dismissing Black as simply wrong earns 1, not 2. A black body is
+          wavelength independent; the response has to say why that is too
+          narrow.
+
+    - id: factually_sound
+      kind: judge
+      target: both
+      weight: 1.0
+      scale: [0, 2]
+      guidance: >
+        Is every physical claim correct? 2 = all correct, 1 = one harmless
+        imprecision, 0 = a clear error about radiative properties, such as
+        emissivity above 1 or a misstatement of Kirchhoff's law.
