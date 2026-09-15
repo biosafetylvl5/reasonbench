@@ -8,6 +8,7 @@ without touching the samples.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Self
 import yaml
 
 from reasonbench.config import Frozen
+from reasonbench.errors import RunDirError
 from reasonbench.openrouter import ReasoningAvailability, SampleResult
 
 if TYPE_CHECKING:
@@ -118,19 +120,28 @@ class ScoreRow(Frozen):
     reason: str | None = None
 
 
-def new_run_dir(root: Path, label: str | None = None) -> Path:
+def new_run_dir(
+    root: Path, label: str | None = None, *, run_id: str | None = None
+) -> Path:
     """Create and return a fresh timestamped run directory."""
-    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
-    name = f"{stamp}_{label}" if label else stamp
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+    suffix = run_id or secrets.token_hex(2)
+    stem = f"{stamp}-{suffix}"
+    name = f"{stem}_{label}" if label else stem
     run_dir = root / name
-    (run_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (run_dir / "raw").mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
 class RunStore:
     """Owns the SQLite connection and raw-artifact directory for one run."""
 
-    def __init__(self, run_dir: Path) -> None:
+    def __init__(self, run_dir: Path, *, create: bool = False) -> None:
+        if not create and not (run_dir / "results.sqlite").is_file():
+            raise RunDirError(
+                f"not a run directory: {run_dir}",
+                hint="list runs with `reasonbench ls`.",
+            )
         self.run_dir = run_dir
         self.raw_dir = run_dir / "raw"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -221,9 +232,12 @@ class RunStore:
         name = f"{sample_id}_r{repeat}_a{attempt}.json"
         (judge_dir / name).write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
-    def clear_scores(self) -> None:
-        """Drop all scores so a rewritten rubric can be applied cleanly."""
-        self._conn.execute("DELETE FROM scores")
+    def clear_scores(self, kind: str | None = None) -> None:
+        """Drop stored scores, optionally only those of one kind."""
+        if kind is None:
+            self._conn.execute("DELETE FROM scores")
+        else:
+            self._conn.execute("DELETE FROM scores WHERE kind = ?", (kind,))
         self._conn.commit()
 
     def add_scores(self, rows: list[ScoreRow]) -> None:

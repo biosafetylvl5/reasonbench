@@ -19,11 +19,9 @@ from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from reasonbench.errors import ConfigError, MissingAPIKeyError
+
 KEY_FILENAME = "openrouter.key"
-
-
-class ConfigError(Exception):
-    """Raised when a configuration file is missing, malformed, or inconsistent."""
 
 
 class Frozen(BaseModel):
@@ -56,9 +54,11 @@ class Settings(BaseSettings):
             if key:
                 return key
 
-        raise ConfigError(
-            "No OpenRouter API key. Set OPENROUTER_API_KEY, add it to .env, "
-            f"or place it in {candidate}.",
+        raise MissingAPIKeyError(
+            "no OpenRouter API key",
+            hint=(
+                f"set OPENROUTER_API_KEY, add it to .env, or place it in {candidate}."
+            ),
         )
 
 

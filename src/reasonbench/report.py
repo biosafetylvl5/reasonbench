@@ -5,30 +5,38 @@ from __future__ import annotations
 import csv
 from typing import TYPE_CHECKING
 
-from rich.table import Table
+from reasonbench import ui
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    from rich.console import Console
+    from rich.table import Table
 
     from reasonbench.scoring import GroupSummary
     from reasonbench.storage import SampleRow
+
+
+# Below this many observations there is no spread to report.
+MIN_FOR_SPREAD = 2
 
 
 def _fmt(value: float | None, digits: int = 2) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
-def _fmt_pm(mean: float | None, stdev: float | None) -> str:
+def fmt_pm(mean: float | None, stdev: float | None, n: int) -> str:
+    """Format ``mean +/- stdev``, keeping 'no spread' distinct from 'one sample'."""
     if mean is None:
-        return "[dim]n/a[/dim]"
-    return f"{mean:.2f} ± {stdev:.2f}" if stdev else f"{mean:.2f}"
+        return "n/a"
+    if n < MIN_FOR_SPREAD:
+        return f"{mean:.2f} (n=1)"
+    return f"{mean:.2f} ± {stdev or 0.0:.2f}"
 
 
 def summary_table(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> Table:
     """Build the headline per-group results table."""
-    table = Table(title="Weighted rubric score", header_style="bold")
+    table = ui.table("Weighted rubric score")
     for field in group_by:
         table.add_column(field, style="cyan", no_wrap=True)
     table.add_column("n", justify="right")
@@ -43,10 +51,10 @@ def summary_table(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> T
     for summary in summaries:
         traces = ", ".join(f"{k}={v}" for k, v in sorted(summary.availability.items()))
         table.add_row(
-            *summary.key,
+            *(ui.cell(k) for k in summary.key),
             str(summary.n_samples),
             str(summary.n_failed) if summary.n_failed else "-",
-            _fmt_pm(summary.weighted_mean, summary.weighted_stdev),
+            fmt_pm(summary.weighted_mean, summary.weighted_stdev, summary.n_scored),
             f"{summary.mean_reasoning_tokens:.0f}",
             f"{summary.mean_completion_tokens:.0f}",
             f"{summary.mean_latency_s:.1f}",
@@ -58,7 +66,7 @@ def summary_table(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> T
 
 def criteria_table(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> Table:
     """Build the per-criterion breakdown table."""
-    table = Table(title="Per-criterion scores (normalized 0-1)", header_style="bold")
+    table = ui.table("Per-criterion scores (normalized 0-1)")
     for field in group_by:
         table.add_column(field, style="cyan", no_wrap=True)
     table.add_column("criterion")
@@ -74,15 +82,29 @@ def criteria_table(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> 
             if criterion.n_scored == 0 and criterion.n_total:
                 coverage = f"[yellow]{coverage}[/yellow]"
             table.add_row(
-                *(summary.key if index == 0 else ("",) * len(group_by)),
-                criterion.criterion_id,
-                criterion.kind,
-                criterion.target,
+                *(
+                    ui.cell(k)
+                    for k in (summary.key if index == 0 else ("",) * len(group_by))
+                ),
+                ui.cell(criterion.criterion_id),
+                ui.cell(criterion.kind),
+                ui.cell(criterion.target),
                 f"{criterion.weight:g}",
-                _fmt_pm(criterion.mean, criterion.stdev),
+                fmt_pm(criterion.mean, criterion.stdev, criterion.n_scored),
                 coverage,
             )
     return table
+
+
+def _md_row(cells: Sequence[object]) -> str:
+    return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+def _md_table(headers: Sequence[str], rows: Iterable[Sequence[object]]) -> list[str]:
+    """Render a Markdown table whose separator is derived from the headers."""
+    out = [_md_row(headers), "|" + "---|" * len(headers)]
+    out.extend(_md_row(r) for r in rows)
+    return out
 
 
 def render_markdown(
@@ -93,49 +115,56 @@ def render_markdown(
     prompt_title: str,
 ) -> str:
     """Render the aggregated results as a Markdown report."""
-    header = " | ".join(group_by)
-    lines = [
-        f"# {title}",
-        "",
-        f"Prompt: {prompt_title}",
-        "",
-        "## Weighted rubric score",
-        "",
-        f"| {header} | n | fail | score | reasoning tok | output tok "
-        "| latency s | cost $ | trace availability |",
-        f"|{'---|' * (len(group_by) + 8)}",
-    ]
-    for summary in summaries:
-        traces = ", ".join(f"{k}={v}" for k, v in sorted(summary.availability.items()))
-        score = (
-            "n/a"
-            if summary.weighted_mean is None
-            else f"{summary.weighted_mean:.2f} ± {summary.weighted_stdev or 0:.2f}"
-        )
-        lines.append(
-            f"| {' | '.join(summary.key)} | {summary.n_samples} | "
-            f"{summary.n_failed} | {score} | "
-            f"{summary.mean_reasoning_tokens:.0f} | "
-            f"{summary.mean_completion_tokens:.0f} | "
-            f"{summary.mean_latency_s:.1f} | {summary.total_cost:.4f} | "
-            f"{traces or '-'} |",
-        )
+    group_headers = list(group_by) or ["all"]
+    lines = [f"# {title}", "", f"Prompt: {prompt_title}", ""]
 
-    lines += [
-        "",
-        "## Per-criterion scores",
-        "",
-        f"| {header} | criterion | kind | target | weight | mean | coverage |",
-        f"|{'---|' * (len(group_by) + 6)}",
-    ]
-    for summary in summaries:
-        for criterion in summary.criteria:
-            lines.append(
-                f"| {' | '.join(summary.key)} | {criterion.criterion_id} | "
-                f"{criterion.kind} | {criterion.target} | {criterion.weight:g} | "
-                f"{_fmt(criterion.mean)} | "
-                f"{criterion.n_scored}/{criterion.n_total} |",
-            )
+    lines += ["## Weighted rubric score", ""]
+    lines += _md_table(
+        [
+            *group_headers,
+            "n",
+            "fail",
+            "score",
+            "reasoning tok",
+            "output tok",
+            "latency s",
+            "cost $",
+            "trace availability",
+        ],
+        (
+            [
+                *(summary.key or ("all",)),
+                summary.n_samples,
+                summary.n_failed,
+                fmt_pm(summary.weighted_mean, summary.weighted_stdev, summary.n_scored),
+                f"{summary.mean_reasoning_tokens:.0f}",
+                f"{summary.mean_completion_tokens:.0f}",
+                f"{summary.mean_latency_s:.1f}",
+                f"{summary.total_cost:.4f}",
+                ", ".join(f"{k}={v}" for k, v in sorted(summary.availability.items()))
+                or "-",
+            ]
+            for summary in summaries
+        ),
+    )
+
+    lines += ["", "## Per-criterion scores", ""]
+    lines += _md_table(
+        [*group_headers, "criterion", "kind", "target", "weight", "mean", "coverage"],
+        (
+            [
+                *(summary.key or ("all",)),
+                criterion.criterion_id,
+                criterion.kind,
+                criterion.target,
+                f"{criterion.weight:g}",
+                fmt_pm(criterion.mean, criterion.stdev, criterion.n_scored),
+                f"{criterion.n_scored}/{criterion.n_total}",
+            ]
+            for summary in summaries
+            for criterion in summary.criteria
+        ),
+    )
 
     lines += [
         "",
@@ -171,14 +200,10 @@ def export_csv(samples: list[SampleRow], path: Path) -> None:
             writer.writerow(row.model_dump(mode="json"))
 
 
-def print_report(
-    console: Console,
-    summaries: list[GroupSummary],
-    group_by: tuple[str, ...],
-) -> None:
-    """Print both tables to the terminal."""
-    console.print()
-    console.print(summary_table(summaries, group_by))
-    console.print()
-    console.print(criteria_table(summaries, group_by))
-    console.print()
+def print_report(summaries: list[GroupSummary], group_by: tuple[str, ...]) -> None:
+    """Print both tables to stdout."""
+    ui.data("")
+    ui.data(summary_table(summaries, group_by))
+    ui.data("")
+    ui.data(criteria_table(summaries, group_by))
+    ui.data("")

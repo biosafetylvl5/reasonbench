@@ -19,7 +19,7 @@ def store_one(store, sample_id="s1", fixture="gemma_full_text"):
 
 
 def test_sample_round_trips_through_sqlite(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         original = store_one(store)
         (row,) = store.samples()
     assert row.sample_id == "s1"
@@ -30,7 +30,7 @@ def test_sample_round_trips_through_sqlite(tmp_path):
 
 def test_raw_response_is_written_verbatim(tmp_path):
     run_dir = new_run_dir(tmp_path)
-    with RunStore(run_dir) as store:
+    with RunStore(run_dir, create=True) as store:
         store_one(store)
     artifact = run_dir / "raw" / "s1.json"
     assert artifact.is_file()
@@ -38,7 +38,7 @@ def test_raw_response_is_written_verbatim(tmp_path):
 
 
 def test_existing_ids_drive_resume(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store_one(store, "s1")
         store_one(store, "s2")
         assert store.existing_sample_ids() == {"s1", "s2"}
@@ -46,7 +46,7 @@ def test_existing_ids_drive_resume(tmp_path):
 
 def test_reopening_a_run_dir_keeps_its_samples(tmp_path):
     run_dir = new_run_dir(tmp_path)
-    with RunStore(run_dir) as store:
+    with RunStore(run_dir, create=True) as store:
         store_one(store)
     with RunStore(run_dir) as reopened:
         assert len(reopened.samples()) == 1
@@ -54,7 +54,7 @@ def test_reopening_a_run_dir_keeps_its_samples(tmp_path):
 
 
 def test_total_cost_sums_samples(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         first = store_one(store, "s1")
         second = store_one(store, "s2")
         expected = first.usage.cost + second.usage.cost
@@ -62,7 +62,7 @@ def test_total_cost_sums_samples(tmp_path):
 
 
 def test_scores_can_be_cleared_without_touching_samples(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store_one(store)
         store.add_scores(
             [
@@ -87,7 +87,7 @@ def test_scores_can_be_cleared_without_touching_samples(tmp_path):
 
 
 def test_na_scores_round_trip_as_none(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store_one(store)
         store.add_scores(
             [
@@ -111,7 +111,7 @@ def test_na_scores_round_trip_as_none(tmp_path):
 
 
 def test_judge_repeats_are_stored_separately(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store_one(store)
         store.add_scores(
             [
@@ -135,7 +135,7 @@ def test_judge_repeats_are_stored_separately(tmp_path):
 def test_manifest_round_trips_the_rubric(tmp_path, run_config, prompt_spec):
     """`score` reconstructs the rubric from the manifest, so it must survive."""
     run_dir = new_run_dir(tmp_path)
-    with RunStore(run_dir) as store:
+    with RunStore(run_dir, create=True) as store:
         store.write_manifest(
             {
                 "run_config": run_config.model_dump(mode="json"),
@@ -152,7 +152,7 @@ def test_run_dir_name_includes_a_label(tmp_path):
 
 
 def test_resume_skips_successes_but_retries_failures(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store_one(store, "good")
         store.add_sample(
             SampleResult(
@@ -167,7 +167,7 @@ def test_resume_skips_successes_but_retries_failures(tmp_path):
 
 
 def test_retrying_a_failed_sample_overwrites_it(tmp_path):
-    with RunStore(new_run_dir(tmp_path)) as store:
+    with RunStore(new_run_dir(tmp_path), create=True) as store:
         store.add_sample(
             SampleResult(sample=make_sample(sample_id="s1"), ok=False, error="boom"),
             {"error": "boom"},

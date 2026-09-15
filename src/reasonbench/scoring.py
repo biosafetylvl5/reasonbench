@@ -494,6 +494,7 @@ class GroupSummary(Frozen):
     key: tuple[str, ...]
     n_samples: int
     n_failed: int
+    n_scored: int
     weighted_mean: float | None
     weighted_stdev: float | None
     criteria: tuple[CriterionSummary, ...]
@@ -586,6 +587,7 @@ def aggregate(
                 key=key,
                 n_samples=len(rows),
                 n_failed=len(rows) - len(ok_rows),
+                n_scored=len(per_sample),
                 weighted_mean=statistics.fmean(per_sample) if per_sample else None,
                 weighted_stdev=(
                     statistics.stdev(per_sample) if len(per_sample) > 1 else 0.0
