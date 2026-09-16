@@ -62,6 +62,15 @@ def test_status_escapes_its_arguments(text):
     assert text in buf.getvalue()
 
 
+def test_numeric_arguments_keep_their_format_spec():
+    """Escaping must not stringify numbers; ${:.3f} has to keep working."""
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        ui.configure()
+        ui.status("estimate ~${:.3f} of ${:.2f} ({} samples)", 0.0384, 1.0, 48)
+    assert "~$0.038 of $1.00 (48 samples)" in buf.getvalue()
+
+
 @pytest.mark.parametrize("text", HOSTILE)
 def test_cell_does_not_parse_markup(text):
     assert ui.cell(text).plain == text

@@ -152,8 +152,15 @@ def json_document(payload: Mapping[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
 
 
+def _safe(value: object) -> object:
+    """Escape anything that could carry markup; leave numbers formattable."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return escape(str(value))
+
+
 def _emit(template: str, args: tuple[object, ...]) -> None:
-    _state.err.print(template.format(*(escape(str(a)) for a in args)), soft_wrap=True)
+    _state.err.print(template.format(*(_safe(a) for a in args)), soft_wrap=True)
 
 
 def status(template: str, /, *args: object) -> None:
