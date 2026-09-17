@@ -10,18 +10,34 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
 import yaml
-from jinja2 import StrictUndefined, Template
+from jinja2 import Environment, StrictUndefined
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from reasonbench.errors import ConfigError, MissingAPIKeyError
 
 KEY_FILENAME = "openrouter.key"
+
+# A cell value only reaches a regex through `re_escape`; without it a decimal
+# point, an alternation or a `+` in the data silently rewrites the pattern.
+_ENV = Environment(undefined=StrictUndefined, autoescape=False)  # noqa: S701
+_ENV.filters["re_escape"] = re.escape
+
+
+def render_template(text: str, variables: dict[str, Any]) -> str:
+    """Render one Jinja template with StrictUndefined."""
+    return _ENV.from_string(text).render(**variables)
+
+
+def looks_templated(text: str) -> bool:
+    """Return whether a string contains Jinja syntax worth rendering."""
+    return "{{" in text or "{%" in text or "{#" in text
 
 
 class Frozen(BaseModel):
@@ -225,6 +241,41 @@ class Attachment(Frozen):
         return self.media_type == "application/pdf"
 
 
+class ImageColumn(Frozen):
+    """A dataset column whose cells point at images to attach."""
+
+    column: str
+    media_type: str | None = None
+    required: bool = True
+    attach_to: tuple[str, ...] | Literal["all"] = "all"
+
+    def applies_to(self, variant_id: str) -> bool:
+        """Return whether this column's images belong on ``variant_id``."""
+        return self.attach_to == "all" or variant_id in self.attach_to
+
+
+class CaseSample(Frozen):
+    """A deterministic subsample of the dataset."""
+
+    n: int = Field(ge=1)
+    seed: int = 0
+
+
+class DatasetSpec(Frozen):
+    """Where a prompt's cases live, and how to read them."""
+
+    path: str
+    format: Literal["auto", "jsonl", "csv"] = "auto"
+    id_column: str = "case_id"
+    required_columns: tuple[str, ...] = ()
+    limit: int | None = Field(default=None, ge=1)
+    select: tuple[str, ...] = ()
+    sample: CaseSample | None = None
+    image_root: str | None = None
+    images: tuple[ImageColumn, ...] = ()
+    max_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
+
+
 class Variant(Frozen):
     """One phrasing of the prompt; variants are a sweep axis."""
 
@@ -242,6 +293,7 @@ class PromptSpec(Frozen):
     variables: dict[str, Any] = Field(default_factory=dict)
     variants: tuple[Variant, ...]
     attachments: tuple[Attachment, ...] = ()
+    dataset: DatasetSpec | None = None
     rubric: Rubric
 
     @model_validator(mode="after")
@@ -263,11 +315,12 @@ class PromptSpec(Frozen):
                 )
         return self
 
-    def render(self, variant: Variant) -> tuple[str | None, str]:
-        """Return ``(system, user)`` with ``variables`` substituted via Jinja2."""
-        render = lambda text: Template(text, undefined=StrictUndefined).render(
-            **self.variables,
-        )
+    def render(
+        self, variant: Variant, case_vars: dict[str, Any] | None = None
+    ) -> tuple[str | None, str]:
+        """Return ``(system, user)``, with case values overriding ``variables``."""
+        merged = {**self.variables, **(case_vars or {})}
+        render = lambda text: render_template(text, merged)
         return (
             render(self.system) if self.system else None,
             render(variant.user),
@@ -321,6 +374,7 @@ class RunConfig(Frozen):
     max_retries: int = Field(default=4, ge=0)
     timeout_s: float = Field(default=300.0, gt=0)
     budget_usd: float = Field(default=2.0, gt=0)
+    max_samples: int = Field(default=2000, ge=1)
     judge: JudgeSettings
 
     @model_validator(mode="after")

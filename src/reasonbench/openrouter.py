@@ -26,6 +26,8 @@ from reasonbench.sweep import Sample
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from reasonbench.dataset import Case
+
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 CLIENT_ERROR_STATUS = 400
@@ -96,32 +98,37 @@ class SampleResult(Frozen):
     error: str | None = None
 
 
+def _media_part(name: str, url: str, *, is_pdf: bool) -> dict[str, Any]:
+    if is_pdf:
+        return {"type": "file", "file": {"filename": f"{name}.pdf", "file_data": url}}
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
 def _attachment_part(attachment: Attachment) -> dict[str, Any]:
-    if attachment.is_pdf:
-        return {
-            "type": "file",
-            "file": {"filename": f"{attachment.id}.pdf", "file_data": attachment.url},
-        }
-    return {"type": "image_url", "image_url": {"url": attachment.url}}
+    return _media_part(attachment.id, attachment.url, is_pdf=attachment.is_pdf)
 
 
-def build_messages(prompt: PromptSpec, variant: Variant) -> list[dict[str, Any]]:
-    """Return the ``messages`` array for one prompt variant.
+def build_messages(
+    prompt: PromptSpec, variant: Variant, case: Case | None = None
+) -> list[dict[str, Any]]:
+    """Return the ``messages`` array for one prompt variant and case.
 
-    Text-only prompts use a plain string content field; prompts with
-    attachments use the content-parts form.
+    Text-only prompts use a plain string content field; anything with an
+    attachment or a case image uses the content-parts form.
     """
-    system_text, user_text = prompt.render(variant)
-    attachments = [a for a in prompt.attachments if a.applies_to(variant.id)]
+    system_text, user_text = prompt.render(variant, case.variables if case else None)
+    parts = [
+        _attachment_part(a) for a in prompt.attachments if a.applies_to(variant.id)
+    ]
+    parts += [
+        _media_part(i.column, i.url, is_pdf=i.is_pdf)
+        for i in (case.images if case else ())
+        if i.applies_to(variant.id)
+    ]
 
-    content: str | list[dict[str, Any]]
-    if attachments:
-        content = [
-            {"type": "text", "text": user_text},
-            *(_attachment_part(a) for a in attachments),
-        ]
-    else:
-        content = user_text
+    content: str | list[dict[str, Any]] = (
+        [{"type": "text", "text": user_text}, *parts] if parts else user_text
+    )
 
     messages: list[dict[str, Any]] = []
     if system_text:
@@ -134,6 +141,7 @@ def build_request(
     sample: Sample,
     prompt: PromptSpec,
     config: RunConfig,
+    case: Case | None = None,
 ) -> dict[str, Any]:
     """Return the JSON body for one sample's chat-completions call.
 
@@ -145,7 +153,7 @@ def build_request(
     variant = next(v for v in prompt.variants if v.id == sample.variant_id)
     body: dict[str, Any] = {
         "model": sample.model,
-        "messages": build_messages(prompt, variant),
+        "messages": build_messages(prompt, variant, case),
         "temperature": sample.temperature,
         "max_tokens": config.max_tokens,
     }
@@ -328,12 +336,13 @@ class OpenRouterClient:
         sample: Sample,
         prompt: PromptSpec,
         config: RunConfig,
+        case: Case | None = None,
     ) -> tuple[SampleResult, dict[str, Any]]:
         """Execute one sample, returning its result and the raw response body.
 
         A failed call comes back as ``ok=False``; it does not raise.
         """
-        body = build_request(sample, prompt, config)
+        body = build_request(sample, prompt, config, case)
         started = time.perf_counter()
         try:
             raw = await self.complete(body)

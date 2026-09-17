@@ -5,8 +5,13 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+from typing import TYPE_CHECKING
 
 from reasonbench.config import Frozen, PromptSpec, RunConfig
+
+if TYPE_CHECKING:
+    from reasonbench.config import Variant
+    from reasonbench.dataset import Case, CaseSet
 
 
 class Sample(Frozen):
@@ -19,6 +24,8 @@ class Sample(Frozen):
     temperature: float
     reasoning_effort: str | None
     repeat: int
+    case_id: str = ""
+    prompt_fingerprint: str = ""
 
     @property
     def cell(self) -> tuple[str, str, float, str]:
@@ -31,6 +38,35 @@ class Sample(Frozen):
         )
 
 
+def render_fingerprint(prompt: PromptSpec, variant: Variant, case: Case | None) -> str:
+    """Digest the material that shapes one request.
+
+    Per variant, so editing ``cot`` does not invalidate ``plain``. The rubric is
+    excluded: re-scoring a stored run against a rewritten rubric must stay free.
+    """
+    payload = json.dumps(
+        {
+            "system": prompt.system,
+            "user": variant.user,
+            "variables": prompt.variables,
+            "case_vars": case.variables if case else {},
+            "attachments": [
+                {"id": a.id, "media_type": a.media_type}
+                for a in prompt.attachments
+                if a.applies_to(variant.id)
+            ],
+            "case_images": [
+                {"column": i.column, "sha256": i.sha256}
+                for i in (case.images if case else ())
+                if i.applies_to(variant.id)
+            ],
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def make_sample_id(  # noqa: PLR0913
     *,
     prompt_id: str,
@@ -39,6 +75,8 @@ def make_sample_id(  # noqa: PLR0913
     temperature: float,
     reasoning_effort: str | None,
     repeat: int,
+    case_id: str = "",
+    prompt_fingerprint: str = "",
 ) -> str:
     """Return a stable content-addressed id for one sample.
 
@@ -53,44 +91,66 @@ def make_sample_id(  # noqa: PLR0913
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
             "repeat": repeat,
+            "case_id": case_id,
+            "prompt_fingerprint": prompt_fingerprint,
         },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def expand(config: RunConfig, prompt: PromptSpec) -> tuple[Sample, ...]:
+def expand(
+    config: RunConfig, prompt: PromptSpec, cases: CaseSet | None = None
+) -> tuple[Sample, ...]:
     """Return every sample in the cartesian product of the sweep axes.
 
-    The product is ``models x variants x temperature x reasoning_effort``,
-    each repeated ``sweep.repeats`` times.
+    The product is ``models x cases x variants x temperature x reasoning_effort``,
+    each repeated ``sweep.repeats`` times. With no dataset there is one implicit
+    case, so a prompt that predates datasets expands exactly as before.
     """
+    case_list: tuple[Case | None, ...] = cases.cases if cases else (None,)
+    fingerprints = {
+        (variant.id, case.case_id if case else ""): render_fingerprint(
+            prompt, variant, case
+        )
+        for variant in prompt.variants
+        for case in case_list
+    }
     axes = itertools.product(
         config.models,
+        case_list,
         prompt.variants,
         config.sweep.temperature,
         config.sweep.reasoning_effort,
         range(config.sweep.repeats),
     )
-    return tuple(
-        Sample(
-            sample_id=make_sample_id(
+    out = []
+    for model, case, variant, temperature, effort, repeat in axes:
+        case_id = case.case_id if case else ""
+        fingerprint = fingerprints[variant.id, case_id]
+        out.append(
+            Sample(
+                sample_id=make_sample_id(
+                    prompt_id=prompt.id,
+                    variant_id=variant.id,
+                    model=model,
+                    temperature=temperature,
+                    reasoning_effort=effort,
+                    repeat=repeat,
+                    case_id=case_id,
+                    prompt_fingerprint=fingerprint,
+                ),
                 prompt_id=prompt.id,
                 variant_id=variant.id,
                 model=model,
                 temperature=temperature,
                 reasoning_effort=effort,
                 repeat=repeat,
-            ),
-            prompt_id=prompt.id,
-            variant_id=variant.id,
-            model=model,
-            temperature=temperature,
-            reasoning_effort=effort,
-            repeat=repeat,
+                case_id=case_id,
+                prompt_fingerprint=fingerprint,
+            )
         )
-        for model, variant, temperature, effort, repeat in axes
-    )
+    return tuple(out)
 
 
 def estimate_cost_usd(

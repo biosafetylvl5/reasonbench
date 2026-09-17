@@ -22,6 +22,7 @@ from reasonbench.config import (
     load_prompt,
     load_run_config,
 )
+from reasonbench.dataset import CaseSet, load_cases
 from reasonbench.errors import (
     AmbiguousSampleError,
     ArtifactNotFoundError,
@@ -181,6 +182,7 @@ async def _execute(
     samples: tuple[Sample, ...],
     store: RunStore,
     api_key: str,
+    cases: CaseSet | None = None,
 ) -> RunOutcome:
     """Run every sample concurrently, committing each as it completes."""
     outcome = RunOutcome()
@@ -191,8 +193,11 @@ async def _execute(
         max_retries=config.max_retries,
         timeout_s=config.timeout_s,
     ) as client:
+        by_id = {c.case_id: c for c in (cases.cases if cases else ())}
         tasks = [
-            asyncio.create_task(client.run_sample(sample, prompt, config))
+            asyncio.create_task(
+                client.run_sample(sample, prompt, config, by_id.get(sample.case_id))
+            )
             for sample in samples
         ]
         with progress.reporter(
@@ -239,7 +244,7 @@ async def _execute(
 
 @app.command()
 @handle_errors
-def run(
+def run(  # noqa: PLR0912
     models_yaml: Annotated[Path, typer.Argument(help="Path to models.yaml")],
     prompt_yaml: Annotated[Path, typer.Argument(help="Path to a prompt YAML")],
     dry_run: Annotated[
@@ -263,6 +268,10 @@ def run(
         int,
         typer.Option("--allow-failures", help="Tolerate N failed samples."),
     ] = 0,
+    max_cases: Annotated[
+        int | None,
+        typer.Option("--max-cases", help="Cap the dataset rows used."),
+    ] = None,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = 0,
     no_color: NoColorOpt = False,
@@ -278,9 +287,19 @@ def run(
 
     config = load_run_config(models_yaml)
     prompt = load_prompt(prompt_yaml)
+    cases = load_cases(prompt, prompt_yaml, limit=max_cases)
 
-    samples = expand(config, prompt)
+    samples = expand(config, prompt, cases)
+    if len(samples) > config.max_samples:
+        raise UsageError(
+            f"{len(samples)} samples exceeds max_samples ({config.max_samples})",
+            hint="narrow with --max-cases, fewer axes, or raise max_samples.",
+        )
     ui.data(_plan_table(samples, config))
+    if cases is not None:
+        ui.status(
+            "dataset {}: {} of {} rows", cases.path, len(cases.cases), cases.n_rows
+        )
     ui.status(
         "estimate ~${:.3f} of ${:.2f} budget ({} samples)",
         estimate_cost_usd(samples),
@@ -295,6 +314,8 @@ def run(
     run_dir = resume or new_run_dir(out, label or prompt.id, run_id=run_id)
     with RunStore(run_dir, create=resume is None) as store:
         store.write_manifest(_manifest(config, prompt))
+        if cases is not None:
+            store.write_cases(cases.cases)
         done = store.existing_sample_ids()
         pending = tuple(s for s in samples if s.sample_id not in done)
         if done:
@@ -303,7 +324,9 @@ def run(
         if not pending:
             ui.status("nothing to do; every sample is already stored")
         else:
-            outcome = asyncio.run(_execute(config, prompt, pending, store, api_key))
+            outcome = asyncio.run(
+                _execute(config, prompt, pending, store, api_key, cases)
+            )
 
         ui.status("")
         ui.status(
@@ -344,7 +367,11 @@ def run(
 
 
 async def _judge_all(
-    prompt: PromptSpec, config: RunConfig, store: RunStore, api_key: str
+    prompt: PromptSpec,
+    config: RunConfig,
+    store: RunStore,
+    api_key: str,
+    case_vars: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[ScoreRow], float, int]:
     rows = store.samples()
     async with OpenRouterClient(
@@ -354,7 +381,12 @@ async def _judge_all(
         timeout_s=config.timeout_s,
     ) as client:
         scorer = JudgeScorer(client, prompt, config.judge, on_raw=store.save_judge_raw)
-        tasks = [asyncio.create_task(scorer.score(r)) for r in rows if r.ok]
+        lookup = case_vars or {}
+        tasks = [
+            asyncio.create_task(scorer.score(r, lookup.get(r.case_id)))
+            for r in rows
+            if r.ok
+        ]
         collected: list[ScoreRow] = []
         with progress.reporter("judging", len(tasks), show_cost=False) as bar:
             for future in asyncio.as_completed(tasks):
@@ -395,13 +427,16 @@ def score(
 
     with RunStore(run_dir) as store:
         samples = store.samples()
+        case_vars = store.case_variables()
         if only in {"all", "deterministic"}:
             store.clear_scores("deterministic")
             deterministic = [
                 row
                 for sample in samples
                 if sample.ok
-                for row in score_sample_deterministic(prompt.rubric, sample)
+                for row in score_sample_deterministic(
+                    prompt.rubric, sample, case_vars.get(sample.case_id)
+                )
             ]
             store.add_scores(deterministic)
             ui.status("scored {} deterministic criteria", len(deterministic))
@@ -412,7 +447,7 @@ def score(
 
         store.clear_scores("judge")
         judged, cost, retries = asyncio.run(
-            _judge_all(prompt, config, store, api_key or "")
+            _judge_all(prompt, config, store, api_key or "", case_vars)
         )
         store.add_scores(judged)
         ui.status(

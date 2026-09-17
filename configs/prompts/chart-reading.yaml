@@ -1,0 +1,32 @@
+version: 1
+id: chart-reading
+title: "Reading a bar chart"
+
+dataset:
+  path: ../cases/charts.jsonl
+  image_root: ../assets
+  required_columns: [question, expected]
+  images:
+    - column: chart
+      media_type: image/png
+
+system: |
+  Answer questions about the image you are shown.
+
+variants:
+  - id: plain
+    user: |
+      {{ question }}
+
+      Answer in one word.
+
+rubric:
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 3.0
+      check:
+        type: regex
+        pattern: '(?i)\b{{ expected | re_escape }}\b'

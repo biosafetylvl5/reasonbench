@@ -1,0 +1,76 @@
+# One rubric over a file of questions. The answer key is a dataset column, so
+# adding a case means adding a line rather than copying this file.
+version: 1
+id: mcq-dataset
+title: "Multiple choice over a dataset"
+
+dataset:
+  path: ../cases/mcq.jsonl
+  required_columns: [question, options, expected]
+
+system: |
+  You are a tutor. Be accurate and brief.
+
+variants:
+  - id: plain
+    user: |
+      {{ question }}
+
+      {{ options }}
+
+      Respond with a single letter.
+
+  - id: cot
+    user: |
+      {{ question }}
+
+      {{ options }}
+
+      Work through the options one at a time, then give your final answer as a
+      single letter on the last line.
+
+rubric:
+  judge_instructions: |
+    Grade a multiple-choice answer. The correct option is {{ expected }}.
+    A correct letter reached by wrong reasoning earns nothing.
+
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 3.0
+      check:
+        # re_escape keeps a metacharacter in the data from rewriting the pattern.
+        type: regex
+        pattern: '(?i)^(?:\W*answer\W*)?\W*{{ expected | re_escape }}(?!\w)'
+
+    - id: follows_answer_format
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 0.5
+      check:
+        type: regex
+        pattern: '(?i)^\W*[A-D]\W*$'
+
+    - id: sound_reasoning
+      kind: judge
+      target: reasoning
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the trace reach {{ expected }} by reasoning about the subject,
+          rather than by elimination or assertion?
+        levels:
+          4: "States the governing principle and applies it to this question."
+          3: "Names the right principle but does not connect it fully."
+          2: "Reaches the answer with a correct but shallow justification."
+          1: "Arrives by elimination, with no positive account."
+          0: "No relevant reasoning, or the stated mechanism is wrong."
+        negative_indicators:
+          - "asserts the answer without support"
+          - "invokes an unrelated principle"
+        notes: >
+          Judge the subject matter, not the wording.

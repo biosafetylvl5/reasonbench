@@ -14,7 +14,9 @@ import json
 import re
 import statistics
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from jinja2 import UndefinedError
 
 from reasonbench.config import (
     Check,
@@ -31,12 +33,18 @@ from reasonbench.config import (
     Rubric,
     Target,
     TextScope,
+    looks_templated,
+    render_template,
 )
+from reasonbench.errors import ConfigError
 from reasonbench.openrouter import FatalAPIError, OpenRouterClient, RetryableError
 from reasonbench.storage import SampleRow, ScoreRow
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+CriterionT = TypeVar("CriterionT", DeterministicCriterion, JudgeCriterion)
 
 TARGET_WORDING = {
     Target.OUTPUT: "the final answer only; ignore the reasoning trace",
@@ -119,6 +127,70 @@ def select_text(row: SampleRow, target: Target) -> str | None:
         return reasoning
     parts = [p for p in (reasoning, row.output) if p]
     return "\n\n".join(parts) if parts else None
+
+
+def _render_field(text: str, case_vars: dict[str, Any], where: str) -> str:
+    try:
+        return render_template(text, case_vars)
+    except (UndefinedError, TypeError, ValueError) as exc:
+        # A filter such as re_escape fails on StrictUndefined with TypeError,
+        # before jinja reports the undefined name. Both mean the same thing:
+        # the column this criterion needs is not in the row.
+        raise ConfigError(
+            f"{where}: cannot render against this case: {exc}",
+            hint=f"available columns: {', '.join(sorted(case_vars)) or '(none)'}",
+        ) from exc
+
+
+def resolve_criterion(
+    criterion: CriterionT, case_vars: dict[str, Any] | None
+) -> CriterionT:
+    """Render a criterion's templated fields against one case's variables.
+
+    Only strings containing Jinja syntax are touched, so an untemplated rubric
+    comes back byte-identical. Patterns are compiled here: a regex broken by a
+    data value should name the criterion, not surface as a traceback later.
+    """
+    if not case_vars:
+        return criterion
+    where = f"criterion {criterion.id!r}"
+    if isinstance(criterion, DeterministicCriterion):
+        check = criterion.check
+        updates: dict[str, Any] = {}
+        for field in ("pattern", "expected", "extract"):
+            value = getattr(check, field, None)
+            if isinstance(value, str) and looks_templated(value):
+                updates[field] = _render_field(value, case_vars, where)
+        if not updates:
+            return criterion
+        check = check.model_copy(update=updates)
+        if isinstance(check, RegexCheck):
+            try:
+                re.compile(check.pattern)
+            except re.error as exc:
+                raise ConfigError(
+                    f"{where}: rendered pattern is not a valid regex: {exc}",
+                    hint=f"pattern was {check.pattern!r}",
+                ) from exc
+        return criterion.model_copy(update={"check": check})
+
+    guidance = criterion.guidance
+    updates = {}
+    if looks_templated(guidance.summary):
+        updates["summary"] = _render_field(guidance.summary, case_vars, where)
+    levels = {
+        k: (_render_field(v, case_vars, where) if looks_templated(v) else v)
+        for k, v in guidance.levels.items()
+    }
+    if levels != guidance.levels:
+        updates["levels"] = levels
+    if guidance.notes and looks_templated(guidance.notes):
+        updates["notes"] = _render_field(guidance.notes, case_vars, where)
+    if not updates:
+        return criterion
+    return criterion.model_copy(
+        update={"guidance": guidance.model_copy(update=updates)}
+    )
 
 
 def score_deterministic(
@@ -205,10 +277,11 @@ def build_judge_prompt(
     row: SampleRow,
     criteria: tuple[JudgeCriterion, ...],
     settings: JudgeSettings,
+    case_vars: dict[str, Any] | None = None,
 ) -> str:
     """Build the judge's user message for one sample."""
     variant = next(v for v in prompt.variants if v.id == row.variant_id)
-    _, question = prompt.render(variant)
+    _, question = prompt.render(variant, case_vars)
     trace = row.readable_reasoning
 
     sections = [
@@ -237,7 +310,7 @@ def build_judge_prompt(
         row.output[: settings.max_chars].strip() or "(empty)",
         "",
         "## Criteria",
-        *[render_guidance(c) + "\n" for c in criteria],
+        *[render_guidance(resolve_criterion(c, case_vars)) + "\n" for c in criteria],
         "Score every criterion independently against its anchors. Judge only "
         "what the criterion names. Justify each score in one sentence, quoting "
         "the response where useful.",
@@ -283,6 +356,7 @@ def build_judge_request(
     row: SampleRow,
     criteria: tuple[JudgeCriterion, ...],
     settings: JudgeSettings,
+    case_vars: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the full chat-completions body for one judge call."""
     system = settings.persona
@@ -294,7 +368,9 @@ def build_judge_request(
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": build_judge_prompt(prompt, row, criteria, settings),
+                "content": build_judge_prompt(
+                    prompt, row, criteria, settings, case_vars
+                ),
             },
         ],
         "temperature": settings.temperature,
@@ -432,14 +508,18 @@ class JudgeScorer:
         rows = parse_judge_response(raw, row, criteria, repeat)
         return rows if all(r.applicable for r in rows) else None
 
-    async def score(self, row: SampleRow) -> list[ScoreRow]:
+    async def score(
+        self, row: SampleRow, case_vars: dict[str, Any] | None = None
+    ) -> list[ScoreRow]:
         """Return every judge score for one sample, including N/A rows."""
         gradeable, skipped = applicable_judge_criteria(self._prompt.rubric, row)
         rows = na_rows(row, skipped)
         if not gradeable:
             return rows
 
-        body = build_judge_request(self._prompt, row, gradeable, self._settings)
+        body = build_judge_request(
+            self._prompt, row, gradeable, self._settings, case_vars
+        )
         for repeat in range(self._settings.repeats):
             for attempt in range(self._settings.parse_retries + 1):
                 scored = await self._attempt(body, row, gradeable, repeat, attempt)
@@ -461,13 +541,15 @@ class JudgeScorer:
 def score_sample_deterministic(
     rubric: Rubric,
     row: SampleRow,
+    case_vars: dict[str, Any] | None = None,
 ) -> list[ScoreRow]:
     """Score every deterministic criterion for one sample."""
-    return [
-        score_deterministic(c, row)
-        for c in rubric.criteria
-        if isinstance(c, DeterministicCriterion)
-    ]
+    out = []
+    for criterion in rubric.criteria:
+        if isinstance(criterion, DeterministicCriterion):
+            resolved = resolve_criterion(criterion, case_vars)
+            out.append(score_deterministic(resolved, row))
+    return out
 
 
 class CriterionSummary(Frozen):

@@ -20,6 +20,7 @@ from reasonbench.errors import RunDirError
 from reasonbench.openrouter import ReasoningAvailability, SampleResult
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
     from types import TracebackType
 
@@ -27,6 +28,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
     sample_id              TEXT PRIMARY KEY,
     prompt_id              TEXT NOT NULL,
+    case_id                TEXT NOT NULL DEFAULT '',
+    prompt_fingerprint     TEXT NOT NULL DEFAULT '',
     variant_id             TEXT NOT NULL,
     model                  TEXT NOT NULL,
     temperature            REAL NOT NULL,
@@ -64,8 +67,22 @@ CREATE TABLE IF NOT EXISTS scores (
     PRIMARY KEY (sample_id, criterion_id, judge_repeat)
 );
 
+CREATE TABLE IF NOT EXISTS cases (
+    case_id     TEXT PRIMARY KEY,
+    idx         INTEGER NOT NULL,
+    source_line INTEGER,
+    variables   TEXT NOT NULL,
+    images      TEXT NOT NULL DEFAULT '[]',
+    digest      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
 CREATE INDEX IF NOT EXISTS idx_scores_sample ON scores (sample_id);
+CREATE INDEX IF NOT EXISTS idx_samples_case ON samples (case_id);
 """
+
+SCHEMA_VERSION = 2
 
 
 class SampleRow(Frozen):
@@ -73,6 +90,8 @@ class SampleRow(Frozen):
 
     sample_id: str
     prompt_id: str
+    case_id: str = ""
+    prompt_fingerprint: str = ""
     variant_id: str
     model: str
     temperature: float
@@ -148,7 +167,48 @@ class RunStore:
         self._conn = sqlite3.connect(run_dir / "results.sqlite")
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        found = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            raise RunDirError(
+                f"{run_dir} was written by a newer reasonbench "
+                f"(schema {found}, this build understands {SCHEMA_VERSION})",
+            )
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
+
+    def write_cases(self, cases: Iterable[Any]) -> None:
+        """Persist the dataset rows a run used. Image payloads are not stored."""
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO cases VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    c.case_id,
+                    c.index,
+                    c.source_line,
+                    json.dumps(c.variables, default=str),
+                    json.dumps(
+                        [
+                            {
+                                "column": i.column,
+                                "ref": i.ref,
+                                "media_type": i.media_type,
+                                "bytes": i.bytes_,
+                                "sha256": i.sha256,
+                            }
+                            for i in c.images
+                        ]
+                    ),
+                    c.digest,
+                )
+                for c in cases
+            ],
+        )
+        self._conn.commit()
+
+    def case_variables(self) -> dict[str, dict[str, Any]]:
+        """Return each stored case's variables, keyed by case id."""
+        rows = self._conn.execute("SELECT case_id, variables FROM cases")
+        return {r["case_id"]: json.loads(r["variables"]) for r in rows}
 
     def __enter__(self) -> Self:
         return self
@@ -182,8 +242,16 @@ class RunStore:
         sample = result.sample
         self._conn.execute(
             """
-            INSERT OR REPLACE INTO samples VALUES (
-                :sample_id, :prompt_id, :variant_id, :model, :temperature,
+            INSERT OR REPLACE INTO samples (
+                sample_id, prompt_id, case_id, prompt_fingerprint, variant_id,
+                model, temperature, reasoning_effort, repeat, ok, output,
+                reasoning_availability, reasoning_text, reasoning_summary,
+                reasoning_tokens, prompt_tokens, completion_tokens, total_tokens,
+                cost, latency_s, served_model, provider, finish_reason, error,
+                created_at
+            ) VALUES (
+                :sample_id, :prompt_id, :case_id, :prompt_fingerprint,
+                :variant_id, :model, :temperature,
                 :reasoning_effort, :repeat, :ok, :output, :reasoning_availability,
                 :reasoning_text, :reasoning_summary, :reasoning_tokens,
                 :prompt_tokens, :completion_tokens, :total_tokens, :cost,
@@ -194,6 +262,8 @@ class RunStore:
             {
                 "sample_id": sample.sample_id,
                 "prompt_id": sample.prompt_id,
+                "case_id": sample.case_id,
+                "prompt_fingerprint": sample.prompt_fingerprint,
                 "variant_id": sample.variant_id,
                 "model": sample.model,
                 "temperature": sample.temperature,
