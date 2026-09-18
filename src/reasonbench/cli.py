@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 import yaml
 
-from reasonbench import __version__, progress, ui
+from reasonbench import __version__, export, progress, ui
 from reasonbench import report as reporting
 from reasonbench.config import (
     PromptSpec,
@@ -27,6 +27,7 @@ from reasonbench.errors import (
     AmbiguousSampleError,
     ArtifactNotFoundError,
     ExitCode,
+    GateFailedError,
     ManifestError,
     ReasonBenchError,
     RunDirError,
@@ -34,8 +35,14 @@ from reasonbench.errors import (
     SampleNotFoundError,
     UsageError,
 )
+from reasonbench.gate import GateResult, GateSpec, OverallGate, evaluate, load_gate
 from reasonbench.openrouter import OpenRouterClient
-from reasonbench.scoring import JudgeScorer, aggregate, score_sample_deterministic
+from reasonbench.scoring import (
+    JudgeScorer,
+    aggregate,
+    collapse_judge_repeats,
+    score_sample_deterministic,
+)
 from reasonbench.storage import RunStore, SampleRow, ScoreRow, new_run_dir
 from reasonbench.sweep import Sample, estimate_cost_usd, expand
 
@@ -720,3 +727,137 @@ def ls(
                 ui.cell(f"{store.total_cost():.4f}"),
             )
     ui.data(table)
+
+
+def _gate_outputs(
+    run_dir: Path,
+    prompt: PromptSpec,
+    store: RunStore,
+    spec: GateSpec | None,
+    group_by: tuple[str, ...],
+    *,
+    json_out: Path | None,
+    junit: Path | None,
+) -> GateResult:
+    """Evaluate the gate over a stored run and write the CI artifacts."""
+    samples = store.samples()
+    scores = store.scores()
+    if not samples:
+        raise UsageError("run contains no samples")
+
+    overall = aggregate(samples, scores, prompt.rubric, group_by=())[0]
+    groups = {group_by: aggregate(samples, scores, prompt.rubric, group_by=group_by)}
+    for extra in {g.by for g in (spec.groups if spec else ())}:
+        if extra not in groups:
+            groups[extra] = aggregate(samples, scores, prompt.rubric, group_by=extra)
+
+    result = evaluate(spec, overall, groups)
+    code = int(ExitCode.GATE) if not result.passed else int(ExitCode.OK)
+
+    if json_out is not None:
+        export.write_json(
+            export.build_report(
+                run_dir=run_dir,
+                prompt_id=prompt.id,
+                prompt_title=prompt.title,
+                group_by=group_by,
+                overall=overall,
+                groups=groups[group_by],
+                gate=result,
+                exit_code=code,
+            ),
+            json_out,
+        )
+        ui.status("wrote {}", json_out)
+    if junit is not None:
+        first = next(
+            (c.id for c in prompt.rubric.criteria if c.kind == "deterministic"), None
+        )
+        export.write_junit(
+            junit,
+            samples,
+            collapse_judge_repeats(scores),
+            result,
+            case_criterion=first,
+        )
+        ui.status("wrote {}", junit)
+
+    if not result.configured:
+        return result
+
+    table = ui.table("Gate")
+    for col in ("assertion", "observed", "required", ""):
+        table.add_column(col)
+    marks = {"passed": "pass", "failed": "FAIL", "skipped": "skip"}
+    for a in result.assertions:
+        observed = "n/a" if a.observed is None else f"{a.observed:.4g}"
+        table.add_row(
+            ui.cell(a.id),
+            ui.cell(observed),
+            ui.cell(f"{a.comparator} {a.threshold:.4g}"),
+            ui.cell(marks[a.status]),
+        )
+    ui.data(table)
+    for a in result.assertions:
+        if a.status == "skipped":
+            ui.warn("{}: {}", a.id, a.reason)
+    return result
+
+
+def _resolve_gate(gate_file: Path | None, fail_under: float | None) -> GateSpec | None:
+    if gate_file is not None and fail_under is not None:
+        raise UsageError("--gate and --fail-under are mutually exclusive")
+    if gate_file is not None:
+        return load_gate(gate_file)
+    if fail_under is not None:
+        return GateSpec(
+            overall=OverallGate(min_samples=1, min_weighted_mean=fail_under)
+        )
+    return None
+
+
+@app.command(name="gate")
+@handle_errors
+def gate_cmd(
+    run_dir: Annotated[Path, typer.Argument(help="Run directory to gate")],
+    gate_file: Annotated[
+        Path | None, typer.Option("--gate", help="Path to gate.yaml.")
+    ] = None,
+    fail_under: Annotated[
+        float | None, typer.Option("--fail-under", help="Minimum weighted mean.")
+    ] = None,
+    group_by: Annotated[
+        str, typer.Option("--group-by", help="Grouping for the report.")
+    ] = "model",
+    json_out: Annotated[
+        Path | None, typer.Option("--json-out", help="Write report.json here.")
+    ] = None,
+    junit: Annotated[
+        Path | None, typer.Option("--junit", help="Write JUnit XML here.")
+    ] = None,
+    quiet: QuietOpt = False,
+    no_color: NoColorOpt = False,
+) -> None:
+    """Check a stored run against thresholds. Makes no API calls."""
+    ui.configure(quiet=quiet, no_color=no_color)
+    if not run_dir.is_dir():
+        raise RunDirError(f"no such run directory: {run_dir}")
+    spec = _resolve_gate(gate_file, fail_under)
+    prompt = _manifest_prompt(run_dir)
+    fields = tuple(f.strip() for f in group_by.split(",") if f.strip()) or ("model",)
+    with RunStore(run_dir) as store:
+        result = _gate_outputs(
+            run_dir,
+            prompt,
+            store,
+            spec,
+            fields,
+            json_out=json_out or run_dir / "report.json",
+            junit=junit or run_dir / "junit.xml",
+        )
+    if not result.passed:
+        raise GateFailedError(
+            f"{result.n_failed} of {len(result.assertions)} gate assertions failed"
+        )
+    if result.configured:
+        ui.status("gate passed: {} assertions", result.n_passed)

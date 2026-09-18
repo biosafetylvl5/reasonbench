@@ -1,0 +1,25 @@
+# Thresholds are policy, so they live apart from models.yaml: a run can be
+# re-gated at a different bar without generating anything again.
+version: 1
+
+# A criterion that could not be applied is skipped, not failed. Assert
+# gradeability with min_coverage instead, which is always measurable.
+on_unmeasurable: warn
+
+overall:
+  min_samples: 1
+  min_weighted_mean: 0.70
+  max_failure_rate: 0.10
+  max_cost_usd: 1.00
+
+criteria:
+  - id: correct_answer
+    min_mean: 0.80
+  # A `both`-target criterion has full coverage whenever the output is
+  # non-empty, so this fires on a judge outage but never on a missing trace.
+  - id: sound_reasoning
+    min_coverage: 0.0
+
+groups:
+  - by: [model]
+    min_weighted_mean: 0.50

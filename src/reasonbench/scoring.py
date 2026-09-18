@@ -631,6 +631,10 @@ def aggregate(
     groups: dict[tuple[str, ...], list[SampleRow]] = defaultdict(list)
     for row in samples:
         groups[tuple(str(getattr(row, field)) for field in group_by)].append(row)
+    if not groups and not group_by:
+        # The whole-run group exists even when the run is empty, so a gate can
+        # fail on min_samples rather than finding nothing to assert against.
+        groups[()] = []
 
     summaries = []
     for key, rows in sorted(groups.items()):
