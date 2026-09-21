@@ -18,9 +18,9 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
-      - run: uv run mypy src
+      - run: uv run --all-extras ruff check src tests
+      - run: uv run --all-extras ruff format --check src tests
+      - run: uv run --all-extras mypy src
 
   test:
     runs-on: ${{ matrix.os }}
@@ -37,8 +37,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --all-extras --python ${{ matrix.python }}
-      - run: uv run pytest -q
+      - run: uv run --all-extras --python ${{ matrix.python }} python -VV
+      - run: uv run --all-extras --python ${{ matrix.python }} pytest -q
 
   build:
     runs-on: ubuntu-latest
@@ -97,7 +97,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ollama
         run: |
-          uv run reasonbench eval configs/ci/ollama.yaml \
+          uv run --all-extras reasonbench eval configs/ci/ollama.yaml \
             configs/prompts/mcq-dataset.yaml \
             --gate configs/ci/gate.yaml --max-cases 2 \
             --out reasonbench-runs --run-id "$GITHUB_RUN_ID-text"
@@ -106,7 +106,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ollama
         run: |
-          uv run reasonbench eval configs/ci/vision.yaml \
+          uv run --all-extras reasonbench eval configs/ci/vision.yaml \
             configs/prompts/chart-reading.yaml \
             --gate configs/ci/gate.yaml --skip-judge \
             --out reasonbench-runs --run-id "$GITHUB_RUN_ID-vision"
@@ -114,7 +114,7 @@ jobs:
       - name: Assert the plumbing, not the scores
         run: |
           set -euo pipefail
-          uv run python - <<'PY'
+          uv run --all-extras python - <<'PY'
           import json, pathlib, sys, xml.etree.ElementTree as ET
           runs = sorted(pathlib.Path("reasonbench-runs").iterdir())
           assert runs, "no run directory was produced"
@@ -129,7 +129,7 @@ jobs:
 
       - name: A model that exposes a trace must differ from one that does not
         run: |
-          uv run python - <<'PY'
+          uv run --all-extras python - <<'PY'
           import pathlib, sqlite3
           run = sorted(pathlib.Path("reasonbench-runs").glob("*-text*"))[0]
           conn = sqlite3.connect(run / "results.sqlite")
@@ -145,7 +145,7 @@ jobs:
           OPENROUTER_API_KEY: ollama
         run: |
           set +e
-          uv run reasonbench eval configs/ci/ollama.yaml \
+          uv run --all-extras reasonbench eval configs/ci/ollama.yaml \
             configs/prompts/mcq-dataset.yaml --fail-under 1.01 --max-cases 1 \
             --out reasonbench-runs --run-id "$GITHUB_RUN_ID-fail"
           CODE=$?
