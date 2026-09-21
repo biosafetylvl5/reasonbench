@@ -1,0 +1,9 @@
+# CI asserts plumbing, not quality. A 270M model answers multiple choice close
+# to randomly, so a score threshold here would be flaky by construction; what
+# matters is that the run completed and produced scores at all.
+version: 1
+on_unmeasurable: warn
+
+overall:
+  min_samples: 1
+  max_failure_rate: 0.5

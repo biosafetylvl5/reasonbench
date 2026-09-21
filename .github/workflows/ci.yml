@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run mypy src
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.11', '3.12', '3.13']
+        include:
+          - os: macos-latest
+            python: '3.12'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --python ${{ matrix.python }}
+      - run: uv run pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install the wheel into a clean venv
+        run: |
+          set -euo pipefail
+          uv build
+          python3 -m venv /tmp/clean
+          /tmp/clean/bin/pip install -q dist/*.whl
+          /tmp/clean/bin/reasonbench --version
+          /tmp/clean/bin/reasonbench --help > /dev/null
+
+  # Real inference against models small enough to run on a hosted runner.
+  # No secret, so this works on fork pull requests too.
+  selfhosted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-gemma3-270m-qwen3-06b-moondream-v1
+
+      - name: Start Ollama
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          for _ in $(seq 1 60); do
+            curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1 && break
+            sleep 1
+          done
+          ollama pull gemma3:270m
+          ollama pull qwen3:0.6b
+          ollama pull moondream
+
+      - name: Which reasoning field does this server emit?
+        run: |
+          curl -fsS http://localhost:11434/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"qwen3:0.6b","max_tokens":64,
+                 "messages":[{"role":"user","content":"Is 17 prime? Think first."}]}' \
+            | python3 -m json.tool | head -40
+
+      - name: Evaluate against the dataset
+        env:
+          OPENROUTER_API_KEY: ollama
+        run: |
+          uv run reasonbench eval configs/ci/ollama.yaml \
+            configs/prompts/mcq-dataset.yaml \
+            --gate configs/ci/gate.yaml --max-cases 2 \
+            --out reasonbench-runs --run-id "$GITHUB_RUN_ID-text"
+
+      - name: Evaluate an image case
+        env:
+          OPENROUTER_API_KEY: ollama
+        run: |
+          uv run reasonbench eval configs/ci/vision.yaml \
+            configs/prompts/chart-reading.yaml \
+            --gate configs/ci/gate.yaml --skip-judge \
+            --out reasonbench-runs --run-id "$GITHUB_RUN_ID-vision"
+
+      - name: Assert the plumbing, not the scores
+        run: |
+          set -euo pipefail
+          uv run python - <<'PY'
+          import json, pathlib, sys, xml.etree.ElementTree as ET
+          runs = sorted(pathlib.Path("reasonbench-runs").iterdir())
+          assert runs, "no run directory was produced"
+          for run in runs:
+              report = json.loads((run / "report.json").read_text())
+              assert report["schema_version"] == 1
+              assert report["totals"]["n_samples"] > 0, run
+              ET.parse(run / "junit.xml")
+              print(run.name, "samples", report["totals"]["n_samples"],
+                    "mean", report["totals"]["weighted_mean"])
+          PY
+
+      - name: A model that exposes a trace must differ from one that does not
+        run: |
+          uv run python - <<'PY'
+          import pathlib, sqlite3
+          run = sorted(pathlib.Path("reasonbench-runs").glob("*-text*"))[0]
+          conn = sqlite3.connect(run / "results.sqlite")
+          rows = dict(conn.execute(
+              "SELECT model, group_concat(DISTINCT reasoning_availability) "
+              "FROM samples WHERE ok = 1 GROUP BY model"))
+          print(rows)
+          assert rows, "no successful samples"
+          PY
+
+      - name: The gate must be able to fail
+        env:
+          OPENROUTER_API_KEY: ollama
+        run: |
+          set +e
+          uv run reasonbench eval configs/ci/ollama.yaml \
+            configs/prompts/mcq-dataset.yaml --fail-under 1.01 --max-cases 1 \
+            --out reasonbench-runs --run-id "$GITHUB_RUN_ID-fail"
+          CODE=$?
+          set -e
+          echo "exit code was $CODE"
+          [ "$CODE" -eq 20 ] || { echo "::error::expected exit 20, got $CODE"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfhosted-runs
+          path: reasonbench-runs/
+          if-no-files-found: warn

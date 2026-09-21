@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 
     from reasonbench.dataset import Case
 
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+# Kept as a module constant: the test suite routes respx on it.
+API_URL = f"{DEFAULT_BASE_URL}/chat/completions"
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 CLIENT_ERROR_STATUS = 400
 
@@ -266,12 +268,14 @@ class OpenRouterClient:
         max_concurrency: int = 8,
         max_retries: int = 4,
         timeout_s: float = 300.0,
+        base_url: str = DEFAULT_BASE_URL,
     ) -> None:
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "X-Title": "reasonbench",
         }
+        self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._timeout = timeout_s
         self._max_retries = max_retries
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -299,7 +303,7 @@ class OpenRouterClient:
         if self._client is None:
             raise RuntimeError("OpenRouterClient must be used as a context manager")
         try:
-            response = await self._client.post(API_URL, json=body)
+            response = await self._client.post(self._url, json=body)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise RetryableError(f"transport error: {exc}") from exc
 

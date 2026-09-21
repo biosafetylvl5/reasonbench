@@ -1,0 +1,34 @@
+# Self-hosted models for CI. Free, needs no secret, and runs on fork pull
+# requests, so the exit-code contract is exercised on every change.
+#
+# gemma3:270m has no thinking mode, so its reasoning criteria report n/a.
+# qwen3:0.6b does, which is what exercises trace extraction against a live
+# server rather than a fixture.
+version: 1
+base_url: http://localhost:11434/v1
+
+models:
+  - gemma3:270m
+  - qwen3:0.6b
+
+sweep:
+  repeats: 1
+  temperature: [0.0]
+  reasoning_effort: [null]
+
+max_tokens: 256
+max_concurrency: 2
+max_retries: 2
+timeout_s: 120
+# Self-hosted generation is free, so this cap protects nothing here. It is the
+# sample count that bounds a CI run.
+budget_usd: 1.00
+max_samples: 40
+
+judge:
+  model: qwen3:0.6b
+  temperature: 0.0
+  repeats: 1
+  blind: true
+  max_chars: 4000
+  parse_retries: 1

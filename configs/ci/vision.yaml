@@ -1,0 +1,26 @@
+# A vision model for the image path. moondream is the smallest in Ollama's
+# library with a projector, so the dataset image column is exercised against a
+# real model rather than only in unit tests.
+version: 1
+base_url: http://localhost:11434/v1
+
+models:
+  - moondream
+
+sweep:
+  repeats: 1
+  temperature: [0.0]
+  reasoning_effort: [null]
+
+max_tokens: 64
+max_concurrency: 1
+max_retries: 2
+timeout_s: 180
+budget_usd: 1.00
+max_samples: 4
+
+judge:
+  model: moondream
+  temperature: 0.0
+  repeats: 1
+  parse_retries: 1

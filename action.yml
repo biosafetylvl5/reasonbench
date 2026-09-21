@@ -1,0 +1,162 @@
+name: ReasonBench
+description: Evaluate prompts against a dataset and fail the build when scores drop.
+author: Gwyn Uttmark
+
+inputs:
+  prompt:
+    description: Path to the prompt YAML to evaluate.
+    required: true
+  models:
+    description: Path to models.yaml.
+    required: false
+    default: .reasonbench/models.yaml
+  api-key:
+    description: API key for the endpoint. Pass a secret, never a literal.
+    required: true
+  base-url:
+    description: OpenAI-style endpoint. Defaults to OpenRouter.
+    required: false
+    default: ''
+  gate:
+    description: Path to gate.yaml. Mutually exclusive with fail-under.
+    required: false
+    default: ''
+  fail-under:
+    description: Minimum weighted mean, as a shorthand for a one-line gate.
+    required: false
+    default: ''
+  max-cases:
+    description: Cap the dataset rows used.
+    required: false
+    default: ''
+  group-by:
+    description: Comma-separated fields to group the report by.
+    required: false
+    default: model
+  allow-failures:
+    description: Tolerate this many failed samples before exiting non-zero.
+    required: false
+    default: '0'
+  run-dir:
+    description: Root for run directories.
+    required: false
+    default: reasonbench-runs
+  python-version:
+    description: Set this only to pin the job's Python. It changes later steps.
+    required: false
+    default: ''
+  upload-artifact:
+    description: Upload the run directory, even when the gate fails.
+    required: false
+    default: 'true'
+  artifact-name:
+    description: Artifact name. Derived per matrix leg when empty.
+    required: false
+    default: ''
+
+outputs:
+  passed:
+    description: Whether every gate assertion held.
+    value: ${{ steps.eval.outputs.passed }}
+  exit-code:
+    description: The eval exit code.
+    value: ${{ steps.eval.outputs.exit-code }}
+  weighted-mean:
+    description: The run's overall weighted mean.
+    value: ${{ steps.eval.outputs.weighted-mean }}
+  total-cost-usd:
+    description: What the run spent.
+    value: ${{ steps.eval.outputs.total-cost-usd }}
+  report-json:
+    description: Path to report.json.
+    value: ${{ steps.eval.outputs.report-json }}
+  junit-xml:
+    description: Path to junit.xml.
+    value: ${{ steps.eval.outputs.junit-xml }}
+
+runs:
+  using: composite
+  steps:
+    - name: Guard the runner OS
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "::error::the reasonbench action supports Linux and macOS runners"
+          exit 2
+        fi
+
+    - name: Set up Python
+      if: inputs.python-version != ''
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install reasonbench
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Install the action's own checkout, which GitHub has already placed at
+        # the ref the caller asked for. No git in the job image is needed, and
+        # the consumer's own dependencies are left alone.
+        python3 -m venv "$RUNNER_TEMP/reasonbench-venv"
+        "$RUNNER_TEMP/reasonbench-venv/bin/python" -m pip install -q \
+          --disable-pip-version-check "$GITHUB_ACTION_PATH"
+        echo "rb=$RUNNER_TEMP/reasonbench-venv/bin/reasonbench" >> "$GITHUB_OUTPUT"
+
+    - name: Evaluate
+      id: eval
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.api-key }}
+        REASONBENCH_BASE_URL: ${{ inputs.base-url }}
+      run: |
+        set -uo pipefail
+        echo "::add-mask::${{ inputs.api-key }}"
+
+        # Matrix legs share run_id and sha, so neither disambiguates them.
+        # strategy.job-index is 0 for a non-matrix job.
+        LEG=$(printf '%s\0' "${{ inputs.prompt }}" "${{ inputs.models }}" \
+              "${{ inputs.gate }}" "${{ inputs.fail-under }}" \
+          | shasum -a 256 | cut -c1-8)
+        SUF="${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}-$LEG"
+        echo "suffix=$SUF" >> "$GITHUB_OUTPUT"
+
+        ARGS=(eval "${{ inputs.models }}" "${{ inputs.prompt }}"
+              --out "${{ inputs.run-dir }}" --run-id "$SUF"
+              --group-by "${{ inputs.group-by }}"
+              --allow-failures "${{ inputs.allow-failures }}")
+        [ -n "${{ inputs.gate }}" ]       && ARGS+=(--gate "${{ inputs.gate }}")
+        [ -n "${{ inputs.fail-under }}" ] && ARGS+=(--fail-under "${{ inputs.fail-under }}")
+        [ -n "${{ inputs.max-cases }}" ]  && ARGS+=(--max-cases "${{ inputs.max-cases }}")
+
+        "${{ steps.install.outputs.rb }}" "${ARGS[@]}"
+        CODE=$?
+        echo "exit-code=$CODE" >> "$GITHUB_OUTPUT"
+
+        RUN=$(ls -d "${{ inputs.run-dir }}"/*"$SUF"* 2>/dev/null | head -1 || true)
+        echo "report-json=$RUN/report.json" >> "$GITHUB_OUTPUT"
+        echo "junit-xml=$RUN/junit.xml" >> "$GITHUB_OUTPUT"
+        if [ -f "$RUN/report.json" ]; then
+          "$RUNNER_TEMP/reasonbench-venv/bin/python" - "$RUN/report.json" <<'PY' >> "$GITHUB_OUTPUT"
+        import json, sys
+        d = json.load(open(sys.argv[1]))
+        print(f"passed={str(d['gate']['passed']).lower()}")
+        print(f"weighted-mean={d['totals']['weighted_mean']}")
+        print(f"total-cost-usd={d['totals']['total_cost_usd']}")
+        PY
+        fi
+        exit 0
+
+    - name: Upload the run
+      if: always() && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('reasonbench-report-{0}', steps.eval.outputs.suffix) }}
+        path: ${{ inputs.run-dir }}/
+        if-no-files-found: warn
+
+    - name: Report the verdict
+      if: always()
+      shell: bash
+      run: exit ${{ steps.eval.outputs.exit-code }}

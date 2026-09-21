@@ -375,6 +375,7 @@ class RunConfig(Frozen):
     timeout_s: float = Field(default=300.0, gt=0)
     budget_usd: float = Field(default=2.0, gt=0)
     max_samples: int = Field(default=2000, ge=1)
+    base_url: str | None = None
     judge: JudgeSettings
 
     @model_validator(mode="after")

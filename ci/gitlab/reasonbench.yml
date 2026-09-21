@@ -1,0 +1,80 @@
+# Include this from another project:
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/biosafetylvl5/reasonbench/v1/ci/gitlab/reasonbench.yml'
+#
+#   prompt-eval:
+#     extends: .reasonbench
+#     variables:
+#       REASONBENCH_PROMPT: .reasonbench/prompts/support-triage.yaml
+#       REASONBENCH_GATE: .reasonbench/gate.yaml
+#
+# OPENROUTER_API_KEY must be a masked CI/CD variable. If it is also protected
+# it is unavailable on merge requests from unprotected branches, which is the
+# "green on main, silently skipped on MRs" trap; the rules below make that
+# skip explicit rather than letting the job fail with an auth error.
+
+.reasonbench-base:
+  image: python:3.12-slim
+  stage: test
+  variables:
+    REASONBENCH_REF: v1
+    REASONBENCH_REPO: https://github.com/biosafetylvl5/reasonbench.git
+    REASONBENCH_MODELS: .reasonbench/models.yaml
+    REASONBENCH_PROMPT: .reasonbench/prompts/default.yaml
+    REASONBENCH_GATE: ''
+    REASONBENCH_RUN_DIR: reasonbench-runs
+    REASONBENCH_EXTRA: ''
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key: "reasonbench-$CI_JOB_IMAGE-$REASONBENCH_REF"
+    paths: [.cache/pip]
+  before_script:
+    # The image needs git for a VCS install. Pin a full commit SHA in
+    # REASONBENCH_REF for reproducibility: pip only reuses its wheel cache for
+    # immutable URLs, so a branch or tag rebuilds on every pipeline.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - pip install --quiet "reasonbench @ git+${REASONBENCH_REPO}@${REASONBENCH_REF}"
+
+.reasonbench:
+  extends: .reasonbench-base
+  script:
+    - |
+      set -e
+      ARGS="eval $REASONBENCH_MODELS $REASONBENCH_PROMPT"
+      ARGS="$ARGS --out $REASONBENCH_RUN_DIR --run-id $CI_JOB_ID"
+      if [ -n "$REASONBENCH_GATE" ]; then ARGS="$ARGS --gate $REASONBENCH_GATE"; fi
+      reasonbench $ARGS $REASONBENCH_EXTRA
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths: ["$REASONBENCH_RUN_DIR/"]
+    reports:
+      junit: "$REASONBENCH_RUN_DIR/*/junit.xml"
+  rules:
+    # A fork MR never receives the key; do not pretend otherwise.
+    - if: '$CI_MERGE_REQUEST_SOURCE_PROJECT_ID && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_MERGE_REQUEST_PROJECT_ID'
+      when: never
+    - if: '$OPENROUTER_API_KEY == null || $OPENROUTER_API_KEY == ""'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# No network and no key, so this is safe on every merge request including forks.
+.reasonbench-validate:
+  extends: .reasonbench-base
+  script:
+    - |
+      set -e
+      ARGS="$REASONBENCH_MODELS $REASONBENCH_PROMPT"
+      reasonbench run $ARGS --dry-run
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+.reasonbench-matrix:
+  extends: .reasonbench
+  parallel:
+    matrix:
+      - REASONBENCH_PROMPT:
+          - .reasonbench/prompts/default.yaml

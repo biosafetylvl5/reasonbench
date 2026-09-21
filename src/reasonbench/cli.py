@@ -6,6 +6,7 @@ import asyncio
 import difflib
 import functools
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -36,7 +37,7 @@ from reasonbench.errors import (
     UsageError,
 )
 from reasonbench.gate import GateResult, GateSpec, OverallGate, evaluate, load_gate
-from reasonbench.openrouter import OpenRouterClient
+from reasonbench.openrouter import DEFAULT_BASE_URL, OpenRouterClient
 from reasonbench.scoring import (
     JudgeScorer,
     aggregate,
@@ -58,6 +59,17 @@ app = typer.Typer(
 )
 
 DATA_URL_PLACEHOLDER = "<inlined at run time>"
+
+
+def _base_url(config: RunConfig) -> str:
+    """CLI config, then the environment, then OpenRouter."""
+    return (
+        config.base_url
+        or os.environ.get("REASONBENCH_BASE_URL")
+        or os.environ.get("OPENROUTER_BASE_URL")
+        or DEFAULT_BASE_URL
+    )
+
 
 QuietOpt = Annotated[bool, typer.Option("--quiet", "-q", help="Errors only.")]
 VerboseOpt = Annotated[
@@ -199,6 +211,7 @@ async def _execute(
         max_concurrency=config.max_concurrency,
         max_retries=config.max_retries,
         timeout_s=config.timeout_s,
+        base_url=_base_url(config),
     ) as client:
         by_id = {c.case_id: c for c in (cases.cases if cases else ())}
         tasks = [
@@ -386,6 +399,7 @@ async def _judge_all(
         max_concurrency=config.max_concurrency,
         max_retries=config.max_retries,
         timeout_s=config.timeout_s,
+        base_url=_base_url(config),
     ) as client:
         scorer = JudgeScorer(client, prompt, config.judge, on_raw=store.save_judge_raw)
         lookup = case_vars or {}
@@ -861,3 +875,116 @@ def gate_cmd(
         )
     if result.configured:
         ui.status("gate passed: {} assertions", result.n_passed)
+
+
+@app.command(name="eval")
+@handle_errors
+def eval_cmd(
+    models_yaml: Annotated[Path, typer.Argument(help="Path to models.yaml")],
+    prompt_yaml: Annotated[Path, typer.Argument(help="Path to a prompt YAML")],
+    gate_file: Annotated[
+        Path | None, typer.Option("--gate", help="Path to gate.yaml.")
+    ] = None,
+    fail_under: Annotated[
+        float | None, typer.Option("--fail-under", help="Minimum weighted mean.")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Root for run dirs.")] = Path(
+        "runs"
+    ),
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="Deterministic run-dir suffix.")
+    ] = None,
+    group_by: Annotated[
+        str, typer.Option("--group-by", help="Grouping for the report.")
+    ] = "model",
+    json_out: Annotated[
+        Path | None, typer.Option("--json-out", help="Write report.json here.")
+    ] = None,
+    junit: Annotated[
+        Path | None, typer.Option("--junit", help="Write JUnit XML here.")
+    ] = None,
+    max_cases: Annotated[
+        int | None, typer.Option("--max-cases", help="Cap the dataset rows used.")
+    ] = None,
+    skip_judge: Annotated[
+        bool, typer.Option("--skip-judge", help="Deterministic criteria only.")
+    ] = False,
+    allow_failures: Annotated[
+        int, typer.Option("--allow-failures", help="Tolerate N failed samples.")
+    ] = 0,
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = 0,
+    no_color: NoColorOpt = False,
+    yes: YesOpt = True,
+) -> None:
+    """Run, score, report and gate in one pass. This is what CI calls."""
+    ui.configure(quiet=quiet, verbose=verbose, no_color=no_color, yes=yes)
+    spec = _resolve_gate(gate_file, fail_under)
+    fields = tuple(f.strip() for f in group_by.split(",") if f.strip()) or ("model",)
+
+    config = load_run_config(models_yaml)
+    prompt = load_prompt(prompt_yaml)
+    cases = load_cases(prompt, prompt_yaml, limit=max_cases)
+    samples = expand(config, prompt, cases)
+    if len(samples) > config.max_samples:
+        raise UsageError(
+            f"{len(samples)} samples exceeds max_samples ({config.max_samples})",
+            hint="narrow with --max-cases, fewer axes, or raise max_samples.",
+        )
+    api_key = Settings.resolve()
+
+    run_dir = new_run_dir(out, prompt.id, run_id=run_id)
+    ui.status("run dir: {}", run_dir)
+    stopped: str | None = None
+    with RunStore(run_dir, create=True) as store:
+        store.write_manifest(_manifest(config, prompt))
+        if cases is not None:
+            store.write_cases(cases.cases)
+        outcome = asyncio.run(_execute(config, prompt, samples, store, api_key, cases))
+        stopped = outcome.stopped_reason
+
+        case_vars = store.case_variables()
+        store.clear_scores("deterministic")
+        store.add_scores(
+            [
+                row
+                for sample in store.samples()
+                if sample.ok
+                for row in score_sample_deterministic(
+                    prompt.rubric, sample, case_vars.get(sample.case_id)
+                )
+            ]
+        )
+        if not skip_judge and prompt.rubric.judge_criteria and outcome.n_ok:
+            store.clear_scores("judge")
+            judged, cost, _ = asyncio.run(
+                _judge_all(prompt, config, store, api_key, case_vars)
+            )
+            store.add_scores(judged)
+            ui.status("judged with {} (${:.4f})", config.judge.model, cost)
+
+        result = _gate_outputs(
+            run_dir,
+            prompt,
+            store,
+            spec,
+            fields,
+            json_out=json_out or run_dir / "report.json",
+            junit=junit or run_dir / "junit.xml",
+        )
+
+    # Infrastructure failures outrank the gate: a verdict computed on a
+    # truncated run is not meaningful.
+    if stopped == "budget":
+        raise ReasonBenchError(f"budget of ${config.budget_usd:.2f} exceeded")
+    if outcome.n_ok == 0 and samples:
+        raise RunFailedError("every sample failed")
+    if outcome.n_failed > allow_failures:
+        raise RunFailedError(
+            f"{outcome.n_failed} samples failed (allowed {allow_failures})"
+        )
+    if not result.passed:
+        raise GateFailedError(
+            f"{result.n_failed} of {len(result.assertions)} gate assertions failed"
+        )
+    ui.status("eval passed")

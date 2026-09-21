@@ -15,8 +15,15 @@ whether they expose their thinking.
 uv venv && uv pip install -e ".[dev]"
 ```
 
+To use it from another repository, install a tag:
+
+```bash
+pip install "reasonbench @ git+https://github.com/biosafetylvl5/reasonbench.git@v1"
+```
+
 The key goes in `OPENROUTER_API_KEY`, in `.env`, or in a file called
-`openrouter.key`.
+`openrouter.key`. Any OpenAI-style endpoint works: set `base_url` in
+`models.yaml`, or `REASONBENCH_BASE_URL` in the environment.
 
 ## Use
 
@@ -31,9 +38,125 @@ reasonbench report runs/<dir> --group-by model,variant_id
 generations do, and re-scoring a stored run costs judge tokens only.
 
 ```bash
+reasonbench ls                                   # run directories, newest first
 reasonbench show runs/<dir> <sample-id-prefix>   # trace, answer, scores
 reasonbench raw  runs/<dir> <sample-id-prefix>   # the stored API response
+reasonbench raw  runs/<dir> <prefix> --judge     # the judge response behind a grade
 ```
+
+## Datasets
+
+A prompt can point at a JSONL or CSV of cases instead of hard-coding one
+question. Each row's columns become template variables, so the answer key
+lives in the data and one rubric covers every row.
+
+```yaml
+dataset:
+  path: ../cases/mcq.jsonl
+  required_columns: [question, options, expected]
+
+variants:
+  - id: plain
+    user: |
+      {{ question }}
+
+      {{ options }}
+
+      Respond with a single letter.
+
+rubric:
+  criteria:
+    - id: correct_answer
+      kind: deterministic
+      target: output
+      scope: last_line
+      weight: 3.0
+      check:
+        type: regex
+        pattern: '(?i)^(?:\W*answer\W*)?\W*{{ expected | re_escape }}(?!\w)'
+```
+
+Use `re_escape` on any value interpolated into a pattern. Without it an answer
+key of `2.5` matches the output `225`, and one of `a|b` splits the pattern at
+the top level and matches almost anything.
+
+A row can carry images:
+
+```yaml
+dataset:
+  path: ../cases/charts.jsonl
+  image_root: ../assets
+  images:
+    - column: chart
+      media_type: image/png
+```
+
+Cells may be a path, an `http(s)` URL, a data URL, or a JSON array of those.
+
+## Gating a run
+
+`gate.yaml` holds thresholds. They live apart from `models.yaml` so a stored
+run can be re-checked at a different bar without generating anything again.
+
+```yaml
+overall:
+  min_weighted_mean: 0.70
+  max_failure_rate: 0.10
+criteria:
+  - id: correct_answer
+    min_mean: 0.80
+```
+
+```bash
+reasonbench eval configs/models.yaml configs/prompts/mcq-dataset.yaml \
+  --gate configs/gate.yaml
+reasonbench gate runs/<dir> --gate configs/gate.yaml   # re-check, no API calls
+```
+
+A criterion with nothing to measure is skipped, not failed. Assert
+gradeability with `min_coverage`, which is always measurable.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Everything passed |
+| 2 | Bad invocation or configuration |
+| 3 | Run directory, sample, or artifact not found |
+| 10 | No API key, or the key was rejected |
+| 11 | No sample succeeded |
+| 12 | Budget exceeded |
+| 20 | The run completed but a gate assertion failed |
+
+`eval` writes `report.json` and `junit.xml` whichever way it exits, so CI shows
+what happened rather than an empty artifact.
+
+## In CI
+
+GitHub Actions:
+
+```yaml
+- uses: biosafetylvl5/reasonbench@v1
+  with:
+    prompt: .reasonbench/prompts/support-triage.yaml
+    gate: .reasonbench/gate.yaml
+    api-key: ${{ secrets.OPENROUTER_API_KEY }}
+    max-cases: '20'
+```
+
+GitLab:
+
+```yaml
+include:
+  - remote: 'https://raw.githubusercontent.com/biosafetylvl5/reasonbench/v1/ci/gitlab/reasonbench.yml'
+
+prompt-eval:
+  extends: .reasonbench
+  variables:
+    REASONBENCH_PROMPT: .reasonbench/prompts/support-triage.yaml
+    REASONBENCH_GATE: .reasonbench/gate.yaml
+```
+
+A fork pull request receives no secrets, so the Action declines to run live
+there rather than failing with an auth error.
 
 ## Configuration
 
