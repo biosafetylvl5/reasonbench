@@ -207,6 +207,13 @@ and `--resume` retries it rather than skipping it.
 A judge reply that will not parse is retried (`judge.parse_retries`) before
 being recorded as n/a.
 
+## Reference
+
+- [docs/datasets.md](docs/datasets.md) covers case files, answer keys and images
+- [docs/gate.md](docs/gate.md) covers thresholds and the n/a rule
+- [docs/ci.md](docs/ci.md) covers GitHub Actions, GitLab, and other endpoints
+- [docs/exit-codes.md](docs/exit-codes.md) covers what each exit code means
+
 ## Development
 
 ```bash
