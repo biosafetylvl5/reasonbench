@@ -61,6 +61,14 @@ class ReasoningTrace(Frozen):
     token_count: int | None = None
     block_types: tuple[str, ...] = ()
     formats: tuple[str, ...] = ()
+    source: str = "none"
+
+    @property
+    def billed_but_absent(self) -> bool:
+        """Return whether a provider charged for thinking it did not return."""
+        return self.availability is ReasoningAvailability.ABSENT and bool(
+            self.token_count
+        )
 
     @property
     def readable(self) -> str | None:
@@ -164,19 +172,16 @@ def build_request(
     return body
 
 
-def parse_reasoning(message: dict[str, Any], usage: Usage) -> ReasoningTrace:
-    """Extract a normalized trace from a response ``message``.
+def _typed_blocks(
+    message: dict[str, Any],
+) -> tuple[list[str], list[str], int, list[str], list[str]]:
+    texts: list[str] = []
+    summaries: list[str] = []
+    encrypted = 0
+    block_types: list[str] = []
+    formats: list[str] = []
 
-    Reads both the flat ``reasoning`` string and the structured
-    ``reasoning_details`` blocks, preferring the blocks when present because
-    they identify *which kind* of trace was returned.
-    """
-    plaintext = (message.get("reasoning") or "").strip()
-    blocks = message.get("reasoning_details") or []
-
-    texts, summaries, encrypted = [], [], 0
-    block_types, formats = [], []
-    for block in blocks:
+    for block in message.get("reasoning_details") or []:
         if not isinstance(block, dict):
             continue
         kind = str(block.get("type", ""))
@@ -190,17 +195,67 @@ def parse_reasoning(message: dict[str, Any], usage: Usage) -> ReasoningTrace:
         elif kind == "reasoning.encrypted" and block.get("data"):
             encrypted += 1
 
-    text = "\n".join(texts).strip() or plaintext
+    # Anthropic-compatible servers put thinking in the content parts instead.
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = str(part.get("type", ""))
+            if kind == "thinking" and (value := part.get("thinking")):
+                block_types.append("content.thinking")
+                texts.append(str(value))
+            elif kind == "redacted_thinking":
+                block_types.append("content.redacted_thinking")
+                encrypted += 1
+
+    return texts, summaries, encrypted, block_types, formats
+
+
+def parse_reasoning(message: dict[str, Any], usage: Usage) -> ReasoningTrace:
+    """Extract a normalized trace from a response ``message``.
+
+    Collects from every shape a server might use, in a fixed order. A dialect
+    is a claim about the request, not a guarantee about the reply: a gateway
+    can proxy anything, so nothing here switches on configuration.
+
+    Typed blocks win, because only they say which kind of trace came back.
+    Otherwise the first non-empty string wins, and the strings are never
+    concatenated: a gateway that echoes one trace into two fields would
+    otherwise double it and inflate every length-sensitive judge criterion.
+    """
+    texts, summaries, encrypted, block_types, formats = _typed_blocks(message)
+
+    # reasoning_content is the native field on the servers that emit it;
+    # `reasoning` there is usually a gateway copy, and copies get truncated.
+    fallbacks = (
+        ("reasoning_content", message.get("reasoning_content")),
+        ("reasoning", message.get("reasoning")),
+        ("thinking", message.get("thinking")),
+    )
+    source = "reasoning_details" if texts else "none"
+    text = "\n".join(texts).strip()
+    if not text:
+        for name, value in fallbacks:
+            if isinstance(value, str) and value.strip():
+                text, source = value.strip(), name
+                break
+
     summary = "\n".join(summaries).strip()
+    if not summary and isinstance(message.get("reasoning_summary"), str):
+        summary = str(message["reasoning_summary"]).strip()
 
     if text:
         availability = ReasoningAvailability.FULL_TEXT
     elif summary:
         availability = ReasoningAvailability.SUMMARY_ONLY
+        source = "reasoning_details" if summaries else "reasoning_summary"
     elif encrypted:
         availability = ReasoningAvailability.ENCRYPTED_ONLY
+        source = "reasoning_details"
     else:
         availability = ReasoningAvailability.ABSENT
+        source = "none"
 
     return ReasoningTrace(
         availability=availability,
@@ -209,6 +264,7 @@ def parse_reasoning(message: dict[str, Any], usage: Usage) -> ReasoningTrace:
         token_count=usage.reasoning_tokens or None,
         block_types=tuple(dict.fromkeys(block_types)),
         formats=tuple(dict.fromkeys(formats)),
+        source=source,
     )
 
 
@@ -225,6 +281,21 @@ def parse_usage(raw: dict[str, Any]) -> Usage:
         cached_tokens=prompt_details.get("cached_tokens") or 0,
         cost=float(usage.get("cost") or 0.0),
     )
+
+
+def extract_output_text(message: dict[str, Any]) -> str:
+    """Return the answer text, whether content is a string or content parts."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        # Only the text parts are the answer; thinking parts are the trace.
+        return "\n".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    return ""
 
 
 def parse_response(
@@ -248,7 +319,7 @@ def parse_response(
     return SampleResult(
         sample=sample,
         ok=True,
-        output=(message.get("content") or "").strip(),
+        output=extract_output_text(message),
         reasoning=parse_reasoning(message, usage),
         usage=usage,
         latency_s=latency_s,
