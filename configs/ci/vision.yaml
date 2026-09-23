@@ -18,6 +18,10 @@ max_retries: 2
 timeout_s: 180
 budget_usd: 1.00
 max_samples: 4
+pricing:
+  per_mtok:
+    "*": {prompt: 0.0, completion: 0.0}
+max_total_tokens: 20000
 
 judge:
   model: moondream

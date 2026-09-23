@@ -20,10 +20,15 @@ max_tokens: 256
 max_concurrency: 2
 max_retries: 2
 timeout_s: 120
-# Self-hosted generation is free, so this cap protects nothing here. It is the
-# sample count that bounds a CI run.
 budget_usd: 1.00
 max_samples: 40
+# Ollama reports no usage.cost, so budget_usd alone would not bound anything.
+# Self-hosted generation really is free, so say so and let the token cap bound
+# the run.
+pricing:
+  per_mtok:
+    "*": {prompt: 0.0, completion: 0.0}
+max_total_tokens: 200000
 
 judge:
   model: qwen3:0.6b

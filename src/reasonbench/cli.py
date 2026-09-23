@@ -27,6 +27,7 @@ from reasonbench.dataset import CaseSet, load_cases
 from reasonbench.errors import (
     AmbiguousSampleError,
     ArtifactNotFoundError,
+    BudgetExceededError,
     ExitCode,
     GateFailedError,
     ManifestError,
@@ -38,6 +39,12 @@ from reasonbench.errors import (
 )
 from reasonbench.gate import GateResult, GateSpec, OverallGate, evaluate, load_gate
 from reasonbench.openrouter import DEFAULT_BASE_URL, OpenRouterClient
+from reasonbench.pricing import (
+    UNPRICED_PATIENCE,
+    check_pricing,
+    price_usage,
+    requires_pricing,
+)
 from reasonbench.scoring import (
     JudgeScorer,
     aggregate,
@@ -59,6 +66,11 @@ app = typer.Typer(
 )
 
 DATA_URL_PLACEHOLDER = "<inlined at run time>"
+
+
+def _in_ci() -> bool:
+    """Return whether this looks like a CI runner."""
+    return any(os.environ.get(name) for name in ("CI", "GITHUB_ACTIONS", "GITLAB_CI"))
 
 
 def _base_url(config: RunConfig) -> str:
@@ -189,10 +201,43 @@ class RunOutcome:
 
     def __init__(self) -> None:
         self.spent = 0.0
+        self.tokens = 0
         self.n_ok = 0
         self.n_failed = 0
+        self.n_unpriced = 0
         self.stopped_reason: str | None = None
         self.failures: list[tuple[str, str, str]] = []
+
+
+def _raise_for_outcome(
+    outcome: RunOutcome, config: RunConfig, allow_failures: int, *, spent: float
+) -> None:
+    """Turn a stopped or failed sweep into the exit code CI reads.
+
+    Infrastructure outranks policy: a gate verdict computed on a truncated run
+    is not meaningful, so these are checked before the gate.
+    """
+    if outcome.stopped_reason == "budget":
+        raise BudgetExceededError(
+            f"budget of ${config.budget_usd:.2f} exceeded (${spent:.4f}); run stopped"
+        )
+    if outcome.stopped_reason == "max_total_tokens":
+        raise BudgetExceededError(
+            f"max_total_tokens of {config.max_total_tokens} exceeded"
+        )
+    if outcome.stopped_reason == "cost_unverifiable":
+        raise BudgetExceededError(
+            "this endpoint reports no cost and prices no model, so the budget "
+            "cannot be enforced",
+            hint="add pricing.per_mtok, or set max_total_tokens.",
+        )
+    if outcome.n_ok == 0 and (outcome.n_failed or outcome.n_unpriced):
+        raise RunFailedError("every sample failed")
+    if outcome.n_failed > allow_failures:
+        raise RunFailedError(
+            f"{outcome.n_failed} samples failed (allowed {allow_failures})",
+            hint="raise --allow-failures to tolerate this.",
+        )
 
 
 async def _execute(
@@ -226,9 +271,21 @@ async def _execute(
             try:
                 for future in asyncio.as_completed(tasks):
                     result, raw = await future
+                    cost, source = price_usage(
+                        result.usage, result.sample.model, config
+                    )
+                    if cost != result.usage.cost:
+                        result = result.model_copy(
+                            update={
+                                "usage": result.usage.model_copy(update={"cost": cost})
+                            }
+                        )
+                    if source == "unpriced" and result.ok:
+                        outcome.n_unpriced += 1
                     store.add_sample(result, raw)
-                    outcome.spent += result.usage.cost
-                    bar.advance(ok=result.ok, cost=result.usage.cost)
+                    outcome.spent += cost
+                    outcome.tokens += result.usage.total_tokens
+                    bar.advance(ok=result.ok, cost=cost)
                     if result.ok:
                         outcome.n_ok += 1
                     else:
@@ -254,6 +311,21 @@ async def _execute(
                     if outcome.spent > config.budget_usd:
                         outcome.stopped_reason = "budget"
                         break
+                    if (
+                        config.max_total_tokens is not None
+                        and outcome.tokens > config.max_total_tokens
+                    ):
+                        outcome.stopped_reason = "max_total_tokens"
+                        break
+                    # A run that must enforce a budget cannot do so against an
+                    # endpoint that reports no cost and prices no model.
+                    if (
+                        outcome.n_unpriced >= UNPRICED_PATIENCE
+                        and outcome.n_unpriced == outcome.n_ok
+                        and requires_pricing(config, in_ci=_in_ci())
+                    ):
+                        outcome.stopped_reason = "cost_unverifiable"
+                        break
             finally:
                 for task in tasks:
                     if not task.done():
@@ -264,7 +336,7 @@ async def _execute(
 
 @app.command()
 @handle_errors
-def run(  # noqa: PLR0912
+def run(
     models_yaml: Annotated[Path, typer.Argument(help="Path to models.yaml")],
     prompt_yaml: Annotated[Path, typer.Argument(help="Path to a prompt YAML")],
     dry_run: Annotated[
@@ -330,6 +402,7 @@ def run(  # noqa: PLR0912
         ui.status("--dry-run: no API calls made")
         return
 
+    check_pricing(config, config.models, in_ci=_in_ci())
     api_key = Settings.resolve()
     run_dir = resume or new_run_dir(out, label or prompt.id, run_id=run_id)
     with RunStore(run_dir, create=resume is None) as store:
@@ -372,18 +445,7 @@ def run(  # noqa: PLR0912
         else:
             ui.status("next: reasonbench score {}", run_dir)
 
-        if outcome.stopped_reason == "budget":
-            raise ReasonBenchError(
-                f"budget of ${config.budget_usd:.2f} exceeded "
-                f"(${store.total_cost():.4f}); run stopped",
-            ) from None
-        if pending and outcome.n_ok == 0:
-            raise RunFailedError("every sample failed")
-        if outcome.n_failed > allow_failures:
-            raise RunFailedError(
-                f"{outcome.n_failed} samples failed (allowed {allow_failures})",
-                hint="raise --allow-failures to tolerate this.",
-            )
+        _raise_for_outcome(outcome, config, allow_failures, spent=store.total_cost())
 
 
 async def _judge_all(
@@ -931,17 +993,16 @@ def eval_cmd(
             f"{len(samples)} samples exceeds max_samples ({config.max_samples})",
             hint="narrow with --max-cases, fewer axes, or raise max_samples.",
         )
+    check_pricing(config, config.models, in_ci=_in_ci())
     api_key = Settings.resolve()
 
     run_dir = new_run_dir(out, prompt.id, run_id=run_id)
     ui.status("run dir: {}", run_dir)
-    stopped: str | None = None
     with RunStore(run_dir, create=True) as store:
         store.write_manifest(_manifest(config, prompt))
         if cases is not None:
             store.write_cases(cases.cases)
         outcome = asyncio.run(_execute(config, prompt, samples, store, api_key, cases))
-        stopped = outcome.stopped_reason
 
         case_vars = store.case_variables()
         store.clear_scores("deterministic")
@@ -975,14 +1036,7 @@ def eval_cmd(
 
     # Infrastructure failures outrank the gate: a verdict computed on a
     # truncated run is not meaningful.
-    if stopped == "budget":
-        raise ReasonBenchError(f"budget of ${config.budget_usd:.2f} exceeded")
-    if outcome.n_ok == 0 and samples:
-        raise RunFailedError("every sample failed")
-    if outcome.n_failed > allow_failures:
-        raise RunFailedError(
-            f"{outcome.n_failed} samples failed (allowed {allow_failures})"
-        )
+    _raise_for_outcome(outcome, config, allow_failures, spent=outcome.spent)
     if not result.passed:
         raise GateFailedError(
             f"{result.n_failed} of {len(result.assertions)} gate assertions failed"

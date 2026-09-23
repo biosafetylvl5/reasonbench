@@ -327,6 +327,30 @@ class PromptSpec(Frozen):
         )
 
 
+class PriceEntry(Frozen):
+    """USD per million tokens for one model."""
+
+    prompt: float = Field(ge=0.0)
+    completion: float = Field(ge=0.0)
+    # Most servers count reasoning tokens inside completion_tokens, so pricing
+    # them again doubles the bill and trips the cap at half the real spend.
+    # Set this only where a provider bills them separately.
+    reasoning: float | None = Field(default=None, ge=0.0)
+    # Cached tokens are a subset of prompt_tokens, hence the subtraction in
+    # price_usage rather than an addition.
+    cached_prompt: float | None = Field(default=None, ge=0.0)
+
+
+class Pricing(Frozen):
+    """Local prices, used when the endpoint does not report a cost."""
+
+    per_mtok: dict[str, PriceEntry] = Field(default_factory=dict)
+
+    def entry_for(self, model: str) -> PriceEntry | None:
+        """Return the price for ``model``, falling back to a ``*`` wildcard."""
+        return self.per_mtok.get(model) or self.per_mtok.get("*")
+
+
 class SweepAxes(Frozen):
     """The parameter grid. Cells are the cartesian product of every axis."""
 
@@ -375,7 +399,13 @@ class RunConfig(Frozen):
     timeout_s: float = Field(default=300.0, gt=0)
     budget_usd: float = Field(default=2.0, gt=0)
     max_samples: int = Field(default=2000, ge=1)
+    max_total_tokens: int | None = Field(default=None, gt=0)
     base_url: str | None = None
+    # OpenRouter reports usage.cost; almost nothing else does. Leave this None
+    # to infer it from the base URL.
+    reports_cost: bool | None = None
+    pricing: Pricing = Field(default_factory=Pricing)
+    require_pricing: bool | None = None
     judge: JudgeSettings
 
     @model_validator(mode="after")
