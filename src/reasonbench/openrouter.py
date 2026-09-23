@@ -33,11 +33,17 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Kept as a module constant: the test suite routes respx on it.
 API_URL = f"{DEFAULT_BASE_URL}/chat/completions"
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+# 402 is payment required: a valid key with nothing left to spend.
+AUTH_STATUS = frozenset({401, 402, 403})
 CLIENT_ERROR_STATUS = 400
 
 
 class RetryableError(Exception):
     """A transient failure worth retrying (rate limit, 5xx, timeout)."""
+
+
+class AuthError(Exception):
+    """The endpoint rejected the key, or the account has no credit left."""
 
 
 class FatalAPIError(Exception):
@@ -351,7 +357,8 @@ class OpenRouterClient:
             "Content-Type": "application/json",
             "X-Title": "reasonbench",
         }
-        self._url = f"{base_url.rstrip('/')}/chat/completions"
+        self._base = base_url.rstrip("/")
+        self._url = f"{self._base}/chat/completions"
         self._timeout = timeout_s
         self._max_retries = max_retries
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -386,6 +393,8 @@ class OpenRouterClient:
         if response.status_code in RETRYABLE_STATUS:
             raise RetryableError(f"HTTP {response.status_code}: {response.text[:200]}")
         if response.status_code >= CLIENT_ERROR_STATUS:
+            if response.status_code in AUTH_STATUS:
+                raise AuthError(f"HTTP {response.status_code}: {response.text[:200]}")
             raise FatalAPIError(f"HTTP {response.status_code}: {response.text[:400]}")
 
         payload: dict[str, Any] = response.json()
@@ -410,6 +419,32 @@ class OpenRouterClient:
                 with attempt:
                     return await self._post_once(body)
         raise FatalAPIError("retry loop exited without a result")  # pragma: no cover
+
+    async def preflight(self, model: str) -> None:
+        """Check the key before the sweep starts.
+
+        Tries the models listing first, then a one-token completion, because a
+        server that implements only chat-completions is common. Anything other
+        than a definite rejection is inconclusive and lets the run proceed: a
+        blip here should not stop work that would otherwise succeed.
+        """
+        if self._client is None:
+            raise RuntimeError("use the client as a context manager")
+        try:
+            response = await self._client.get(f"{self._base}/models")
+        except httpx.HTTPError:
+            response = None
+        if response is not None and response.status_code in AUTH_STATUS:
+            raise AuthError(f"HTTP {response.status_code}: {response.text[:200]}")
+        if response is not None and response.is_success:
+            return
+        await self.complete(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }
+        )
 
     async def run_sample(
         self,

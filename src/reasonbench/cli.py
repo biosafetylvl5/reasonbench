@@ -32,6 +32,7 @@ from reasonbench.errors import (
     ExitCode,
     GateFailedError,
     ManifestError,
+    MissingAPIKeyError,
     ReasonBenchError,
     RunDirError,
     RunFailedError,
@@ -39,7 +40,13 @@ from reasonbench.errors import (
     UsageError,
 )
 from reasonbench.gate import GateResult, GateSpec, OverallGate, evaluate, load_gate
-from reasonbench.openrouter import DEFAULT_BASE_URL, OpenRouterClient
+from reasonbench.openrouter import (
+    DEFAULT_BASE_URL,
+    AuthError,
+    FatalAPIError,
+    OpenRouterClient,
+    RetryableError,
+)
 from reasonbench.pricing import (
     UNPRICED_PATIENCE,
     check_pricing,
@@ -210,6 +217,35 @@ class RunOutcome:
         self.failures: list[tuple[str, str, str]] = []
 
 
+def _report_run(
+    run_dir: Path,
+    outcome: RunOutcome,
+    config: RunConfig,
+    n_samples: int,
+    spent: float,
+    retry_cmd: str,
+) -> None:
+    """Summarise a finished sweep, including how to retry what failed."""
+    ui.status("")
+    ui.status(
+        "wrote {}\n  {} samples, {} ok, {} failed, ${:.4f} of ${:.2f}",
+        run_dir,
+        n_samples,
+        outcome.n_ok,
+        outcome.n_failed,
+        spent,
+        config.budget_usd,
+    )
+    if not outcome.failures:
+        ui.status("next: reasonbench score {}", run_dir)
+        return
+    ui.status("")
+    ui.status("{} sample(s) failed:", len(outcome.failures))
+    for sid, cell, err in outcome.failures[:10]:
+        ui.status("  {}  {}\n    {}", sid[:12], cell, err)
+    ui.status("  retry with: {}", retry_cmd)
+
+
 def _raise_for_outcome(
     outcome: RunOutcome, config: RunConfig, allow_failures: int, *, spent: float
 ) -> None:
@@ -239,6 +275,27 @@ def _raise_for_outcome(
             f"{outcome.n_failed} samples failed (allowed {allow_failures})",
             hint="raise --allow-failures to tolerate this.",
         )
+
+
+async def _preflight(config: RunConfig, api_key: str) -> None:
+    """Reject a bad key before the sweep, not after every sample fails."""
+    async with OpenRouterClient(
+        api_key,
+        max_concurrency=1,
+        max_retries=0,
+        timeout_s=min(config.timeout_s, 30.0),
+        base_url=_base_url(config),
+    ) as client:
+        try:
+            await client.preflight(config.models[0])
+        except AuthError as exc:
+            raise MissingAPIKeyError(
+                f"the endpoint rejected this key: {exc}",
+                hint="check OPENROUTER_API_KEY and the account's credit.",
+            ) from None
+        except (RetryableError, FatalAPIError) as exc:
+            # Inconclusive. Say so and let the run decide for itself.
+            ui.note("preflight unavailable: {}", exc)
 
 
 async def _execute(
@@ -366,6 +423,9 @@ def run(
         typer.Option("--max-cases", help="Cap the dataset rows used."),
     ] = None,
     quiet: QuietOpt = False,
+    preflight: Annotated[
+        bool, typer.Option("--preflight/--no-preflight", help="Check the key first.")
+    ] = True,
     verbose: VerboseOpt = 0,
     no_color: NoColorOpt = False,
     yes: YesOpt = False,
@@ -407,6 +467,8 @@ def run(
         return
 
     api_key = Settings.resolve()
+    if preflight:
+        asyncio.run(_preflight(config, api_key))
     run_dir = resume or new_run_dir(out, label or prompt.id, run_id=run_id)
     with RunStore(run_dir, create=resume is None) as store:
         store.write_manifest(_manifest(config, prompt))
@@ -424,29 +486,14 @@ def run(
                 _execute(config, prompt, pending, store, api_key, cases)
             )
 
-        ui.status("")
-        ui.status(
-            "wrote {}\n  {} samples, {} ok, {} failed, ${:.4f} of ${:.2f}",
+        _report_run(
             run_dir,
+            outcome,
+            config,
             len(samples),
-            outcome.n_ok,
-            outcome.n_failed,
             store.total_cost(),
-            config.budget_usd,
+            f"reasonbench run {models_yaml} {prompt_yaml} --resume {run_dir}",
         )
-        if outcome.failures:
-            ui.status("")
-            ui.status("{} sample(s) failed:", len(outcome.failures))
-            for sid, cell, err in outcome.failures[:10]:
-                ui.status("  {}  {}\n    {}", sid[:12], cell, err)
-            ui.status(
-                "  retry with: reasonbench run {} {} --resume {}",
-                models_yaml,
-                prompt_yaml,
-                run_dir,
-            )
-        else:
-            ui.status("next: reasonbench score {}", run_dir)
 
         _raise_for_outcome(outcome, config, allow_failures, spent=store.total_cost())
 
@@ -971,6 +1018,9 @@ def eval_cmd(
     max_cases: Annotated[
         int | None, typer.Option("--max-cases", help="Cap the dataset rows used.")
     ] = None,
+    preflight: Annotated[
+        bool, typer.Option("--preflight/--no-preflight", help="Check the key first.")
+    ] = True,
     skip_judge: Annotated[
         bool, typer.Option("--skip-judge", help="Deterministic criteria only.")
     ] = False,
@@ -1000,6 +1050,8 @@ def eval_cmd(
     for note in check_efforts(config):
         ui.warn("reasoning_effort: {}", note)
     api_key = Settings.resolve()
+    if preflight:
+        asyncio.run(_preflight(config, api_key))
 
     run_dir = new_run_dir(out, prompt.id, run_id=run_id)
     ui.status("run dir: {}", run_dir)
