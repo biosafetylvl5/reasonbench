@@ -6,9 +6,12 @@ reply, so parsing tries every known shape rather than switching on config.
 
 from __future__ import annotations
 
-import pytest
-from conftest import load_fixture, make_sample
+import json
 
+import pytest
+from conftest import load_fixture, make_row, make_sample
+
+from reasonbench.config import Guidance, JudgeCriterion
 from reasonbench.openrouter import (
     ReasoningAvailability,
     extract_output_text,
@@ -16,6 +19,7 @@ from reasonbench.openrouter import (
     parse_response,
     parse_usage,
 )
+from reasonbench.scoring import parse_judge_response
 
 BILLED = parse_usage(
     {
@@ -137,3 +141,51 @@ def test_openrouter_parsing_is_unchanged(fixture, availability, source):
     trace = parse_response(load_fixture(fixture), make_sample(), 1.0).reasoning
     assert trace.availability is availability
     assert trace.source == source
+
+
+JUDGE_CRITERION = None
+
+
+def _graded(value):
+
+    criterion = JudgeCriterion(
+        id="x", kind="judge", scale=(0, 4), guidance=Guidance(summary="s")
+    )
+    raw = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({"x": {"score": value, "justification": "j"}})
+                }
+            }
+        ]
+    }
+    return parse_judge_response(raw, make_row(), (criterion,), 0)[0]
+
+
+@pytest.mark.parametrize(
+    ("value", "normalized", "clamped"),
+    [
+        (3, 0.75, False),
+        (4, 1.0, False),
+        (0, 0.0, False),
+        (7, 1.0, True),
+        (-3, 0.0, True),
+    ],
+)
+def test_a_judge_score_outside_the_scale_is_clamped(value, normalized, clamped):
+    """Unclamped, 7 on a 0-4 scale normalizes to 1.75 and moves every mean."""
+    row = _graded(value)
+    assert row.normalized == pytest.approx(normalized)
+    assert row.clamped is clamped
+    assert row.score == float(value)  # the raw score stays auditable
+
+
+def test_a_clamp_says_so_in_the_reason():
+    assert "outside scale" in (_graded(9).reason or "")
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), "high", None])
+def test_a_non_numeric_judge_score_is_not_applicable(value):
+    """Bool is an int subclass, so {"score": true} used to become 1.0."""
+    assert _graded(value).applicable is False

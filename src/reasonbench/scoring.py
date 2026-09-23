@@ -11,6 +11,7 @@ readable trace. ``None`` aggregates as missing coverage, not as a zero.
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 from collections import defaultdict
@@ -396,13 +397,28 @@ def parse_judge_response(
         entry = parsed.get(criterion.id) or {}
         raw_score = entry.get("score")
         low, high = criterion.scale
-        if isinstance(raw_score, int | float):
-            score = float(raw_score)
-            normalized = (score - low) / (high - low)
-            applicable, reason = True, str(entry.get("justification") or "")
-        else:
+        clamped = False
+        if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
+            # bool is an int subclass, so {"score": true} would otherwise be 1.0.
             score, normalized = None, None
             applicable, reason = False, "judge returned no score for this criterion"
+        elif not math.isfinite(float(raw_score)):
+            score, normalized = None, None
+            applicable = False
+            reason = f"judge returned a non-finite score ({raw_score!r})"
+        else:
+            score = float(raw_score)
+            bounded = min(max(score, float(low)), float(high))
+            clamped = bounded != score
+            normalized = (bounded - low) / (high - low)
+            applicable, reason = True, str(entry.get("justification") or "")
+            if clamped:
+                # Unclamped this lands outside 0-1 and silently moves every
+                # weighted mean the sample contributes to.
+                reason = (
+                    f"judge returned {score:g}, outside scale {low}-{high}; "
+                    f"clamped to {bounded:g}. {reason}"
+                )
         rows.append(
             ScoreRow(
                 sample_id=row.sample_id,
@@ -415,6 +431,7 @@ def parse_judge_response(
                 normalized=normalized,
                 applicable=applicable,
                 reason=reason,
+                clamped=clamped,
             ),
         )
     return rows

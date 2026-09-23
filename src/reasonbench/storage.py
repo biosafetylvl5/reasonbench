@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS scores (
     normalized    REAL,
     applicable    INTEGER NOT NULL,
     reason        TEXT,
+    clamped       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (sample_id, criterion_id, judge_repeat)
 );
 
@@ -82,7 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_sample ON scores (sample_id);
 CREATE INDEX IF NOT EXISTS idx_samples_case ON samples (case_id);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class SampleRow(Frozen):
@@ -137,6 +138,7 @@ class ScoreRow(Frozen):
     normalized: float | None
     applicable: bool
     reason: str | None = None
+    clamped: bool = False
 
 
 def new_run_dir(
@@ -314,9 +316,12 @@ class RunStore:
         """Persist a batch of criterion scores."""
         self._conn.executemany(
             """
-            INSERT OR REPLACE INTO scores VALUES (
+            INSERT OR REPLACE INTO scores (
+                sample_id, criterion_id, judge_repeat, kind, target, weight,
+                score, normalized, applicable, reason, clamped
+            ) VALUES (
                 :sample_id, :criterion_id, :judge_repeat, :kind, :target,
-                :weight, :score, :normalized, :applicable, :reason
+                :weight, :score, :normalized, :applicable, :reason, :clamped
             )
             """,
             [r.model_dump() for r in rows],
