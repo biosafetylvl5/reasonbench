@@ -17,29 +17,27 @@ jobs:
           max-cases: '20'
 ```
 
-The action installs its own checkout, so the job image needs no `git` and the
-consumer's dependencies are untouched. Pin the version by pinning the `uses:`
-ref.
+The action installs its own checkout, so the job image needs no `git`. Pin the
+`uses:` ref.
 
 Outputs: `passed`, `exit-code`, `weighted-mean`, `total-cost-usd`,
 `report-json`, `junit-xml`.
 
 ### Forks
 
-A pull request from a fork receives no secrets. The action declines to run
-live there rather than failing with an auth error. Run the live gate on pushes
-to the default branch and on `workflow_dispatch`; `pull_request_target` is not
-a workaround, because it combines fork-authored configuration with full secret
+A fork pull request gets no secrets, and the action skips the live run there.
+Run the live gate on pushes to the default branch and on `workflow_dispatch`.
+Do not use `pull_request_target`: it runs fork-authored config with secret
 access.
 
 ### Matrix jobs
 
-`github.run_id` and `github.sha` are properties of the run, so every matrix leg
-sees the same values. The action derives a per-leg suffix from
-`strategy.job-index` plus a hash of its inputs, and uses it for both the run
-directory and the artifact name. `upload-artifact@v4` rejects duplicate names,
-and `overwrite: true` is not the fix: it makes duplicates succeed by clobbering
-the other leg's report.
+`github.run_id` and `github.sha` are identical across legs, so the action
+suffixes the run directory and artifact name with `strategy.job-index` and a
+hash of the leg's inputs.
+
+Do not set `overwrite: true` on `upload-artifact@v4`. It clobbers the other
+leg's report.
 
 ## GitLab CI
 
@@ -54,18 +52,14 @@ prompt-eval:
     REASONBENCH_GATE: .reasonbench/gate.yaml
 ```
 
-`OPENROUTER_API_KEY` must be a masked variable. If it is also **protected** it
-is unavailable on merge requests from unprotected branches, which is the most
-common way this appears to work on the default branch and silently skip on
-merge requests. The shipped rules make that skip explicit rather than letting
-the job fail with an auth error.
+`OPENROUTER_API_KEY` must be masked. A protected variable is unavailable on
+merge requests from unprotected branches; the shipped rules skip the job there.
 
-The image needs `git` for a VCS install. Pin a full 40-character commit SHA:
-pip only reuses its wheel cache for immutable URLs, so a branch or tag rebuilds
-on every pipeline.
+The image needs `git` for a VCS install. Pin a full 40-character commit SHA;
+pip rebuilds the wheel every pipeline for a branch or tag.
 
-`.reasonbench-validate` needs no key and no network, so it is safe on every
-merge request including forks.
+`.reasonbench-validate` needs no key and no network. Safe on fork merge
+requests.
 
 ## Other endpoints
 
@@ -77,8 +71,7 @@ base_url: http://localhost:11434/v1   # Ollama
 ```
 
 Traces are read from `reasoning_details`, `reasoning_content`, `reasoning`,
-`thinking`, and Anthropic-style thinking content parts, so a self-hosted vLLM
-or Ollama reports a readable trace rather than reporting none.
+`thinking`, and Anthropic-style thinking content parts.
 
-A server that does not return `usage.cost` leaves `budget_usd` unenforced.
-Bound those runs by `max_samples` instead.
+`budget_usd` needs `usage.cost` in the response. Most of these servers omit
+it; see [exit-codes.md](exit-codes.md).

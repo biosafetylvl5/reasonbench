@@ -1,8 +1,7 @@
 # Datasets
 
-A prompt can name a file of cases instead of hard-coding one question. Each
-row becomes one case: its columns are template variables, so the answer key
-lives in the data and one rubric covers every row.
+A prompt can name a file of cases. Each row is one case; its columns are
+template variables.
 
 ```yaml
 dataset:
@@ -15,18 +14,17 @@ dataset:
   sample: {n: 25, seed: 7}     # deterministic subsample
 ```
 
-`--max-cases N` overrides `limit` for one invocation, which is how a pull
-request job runs a cheap subset of a large dataset.
+`--max-cases N` overrides `limit` for one invocation.
 
 ## File formats
 
-JSONL is one JSON object per line. CSV uses the header row for column names,
-and a cell that starts with `[` is parsed as a JSON array; nothing else is
-reinterpreted.
+- JSONL: one JSON object per line.
+- CSV: the header row gives the column names. A cell that starts with `[` is
+  parsed as a JSON array; nothing else is reinterpreted.
 
 ## Answer keys
 
-Interpolate the expected value into a check, and escape it:
+Interpolate the expected value and escape it:
 
 ```yaml
 check:
@@ -34,21 +32,20 @@ check:
   pattern: '(?i)^(?:\W*answer\W*)?\W*{{ expected | re_escape }}(?!\w)'
 ```
 
-`re_escape` is not optional. Without it the data rewrites the pattern:
+Without `re_escape` the data rewrites the pattern:
 
 | `expected` | Without escaping |
 |---|---|
 | `2.5` | matches the output `225`, because `.` is any character |
 | `a\|b` | splits the pattern at the top level, discarding the anchor |
 | `C++` | `+` is a quantifier; matches a bare `C` |
-| `[Fe` | raises, after the generations are paid for |
+| `[Fe` | raises at check time, after generation |
 
-Use `(?!\w)` rather than a trailing `\b`. After escaping, an answer ending in
-punctuation such as `C++` or `50%` has no word boundary after it, so `\b`
-would stop it matching itself.
+Use `(?!\w)` rather than a trailing `\b`: `C++` and `50%` have no word
+boundary after them.
 
 A column named in the template but missing from a row is an error naming the
-criterion and the case, not a silently permissive pattern.
+criterion and the case.
 
 ## Images
 
@@ -65,16 +62,13 @@ dataset:
 ```
 
 A cell may be a path, an `http(s)` URL, a data URL, or a JSON array of those.
-Local files are read and inlined as data URLs when the dataset loads, so
-request building stays free of file I/O. An image column is an attachment, not
-a template variable, so it does not appear in the rendered prompt.
+Local files are inlined as data URLs at load time. An image column is an
+attachment and does not appear in the rendered prompt.
 
-Only the reference, size and digest are stored in the run database; payloads
-are not.
+Only the reference, size and digest are stored in the run database.
 
 ## What ends up in the run
 
 `case_id` becomes a sample field, so `--group-by case_id` works, and JUnit
-names each test case after it. Sample ids include the case and a fingerprint
-of the rendered prompt, so editing prompt text means `--resume` regenerates
-rather than reusing a stale answer.
+names each test case after it. Sample ids include the case and a fingerprint of
+the rendered prompt, so editing prompt text makes `--resume` regenerate.

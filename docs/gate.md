@@ -1,8 +1,6 @@
 # Gating a run
 
-Thresholds live in their own file. They are policy, they differ between a
-merge request and the default branch, and a stored run should be re-checkable
-at a different bar without generating anything again.
+`gate.yaml`:
 
 ```yaml
 version: 1
@@ -37,33 +35,27 @@ reasonbench gate runs/<dir> --fail-under 0.8     # a one-line gate
 
 `--gate` and `--fail-under` are mutually exclusive.
 
-## Unmeasurable is not zero
+## Unmeasurable samples
 
-A criterion aimed at the reasoning trace cannot be scored when the model
-returned no trace. Those samples score `n/a`, and an assertion with nothing to
-measure is **skipped**, not failed.
-
-Failing it would rank a model down for not exposing its reasoning rather than
-for reasoning badly, which is the confusion this tool exists to prevent.
+A criterion targeting the trace scores `n/a` when the model returned none.
+`on_unmeasurable` sets the status of an assertion with nothing to measure:
+`warn` marks it `skipped` (the default), `fail` marks it `failed`, `pass`
+marks it `passed`.
 
 Assert gradeability separately, with `min_coverage` or `min_scored`. Coverage
 is always measurable, so those assertions fail normally.
 
-`on_unmeasurable: fail` is available, but it red-builds every honest run
-against a model that does not disclose its thinking.
+## Judge outages
 
-## Which criteria catch a judge outage
+Put `min_coverage: 1.0` on a criterion with `target: both`. It falls back to
+the output when there is no trace, so it fires on a judge outage rather than a
+missing trace.
 
-A criterion targeting `both` has full coverage whenever the output is
-non-empty, so `min_coverage: 1.0` on one of those fires when the judge is
-unreachable and never fires merely because a trace was missing.
-
-`min_coverage` on a deterministic criterion can essentially never fail, so it
-asserts nothing.
+Deterministic criteria are scored without the judge. `min_coverage` on one
+never detects an outage.
 
 ## Output
 
 `report.json` lists every assertion with its observed value, threshold and
-status. `junit.xml` carries two suites: one test per case, so a platform can
-show which cases regressed, and one test per assertion, so it can show why
-the job failed.
+status. `junit.xml` carries two suites: one test per case and one test per
+assertion. The gate suite is written only when a gate is configured.
