@@ -383,6 +383,8 @@ class JudgeSettings(Frozen):
     # Retries for a judge reply that does not parse into scores. Distinct from
     # HTTP retries: the call succeeded, the content was just unusable.
     parse_retries: int = Field(default=2, ge=0)
+    # Many OpenAI-compatible servers accept only json_object, or nothing.
+    structured_output: Literal["strict", "json_object", "none"] = "strict"
     persona: str = (
         "You are a strict, impartial grader assessing the quality of a language "
         "model's reasoning and final answer."

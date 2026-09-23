@@ -15,7 +15,7 @@ import math
 import re
 import statistics
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from jinja2 import UndefinedError
 
@@ -46,6 +46,24 @@ if TYPE_CHECKING:
 
 
 CriterionT = TypeVar("CriterionT", DeterministicCriterion, JudgeCriterion)
+
+# Servers that reject structured output say so in the body. Matching narrowly
+# keeps a bad model slug or a real outage from being mistaken for one.
+UNSUPPORTED_MARKERS = (
+    "response_format",
+    "json_schema",
+    "guided",
+    "structured",
+    "not supported",
+    "unsupported",
+    "unrecognized",
+)
+
+# Strongest first. Each rung constrains the judge less than the one above.
+Rung = Literal["strict", "json_object", "none"]
+RUNGS: tuple[Rung, ...] = ("strict", "json_object", "none")
+
+JSON_ONLY = "Reply with a single JSON object and nothing else. No prose, no code fence."
 
 TARGET_WORDING = {
     Target.OUTPUT: "the final answer only; ignore the reasoning trace",
@@ -273,12 +291,14 @@ def applicable_judge_criteria(
     return tuple(gradeable), tuple(not_applicable)
 
 
-def build_judge_prompt(
+def build_judge_prompt(  # noqa: PLR0913
     prompt: PromptSpec,
     row: SampleRow,
     criteria: tuple[JudgeCriterion, ...],
     settings: JudgeSettings,
     case_vars: dict[str, Any] | None = None,
+    *,
+    json_only: bool = False,
 ) -> str:
     """Build the judge's user message for one sample."""
     variant = next(v for v in prompt.variants if v.id == row.variant_id)
@@ -316,7 +336,20 @@ def build_judge_prompt(
         "what the criterion names. Justify each score in one sentence, quoting "
         "the response where useful.",
     ]
+    if json_only:
+        # json_object mode promises valid JSON, not this shape; the lowest rung
+        # promises nothing at all.
+        sections += ["", _schema_sketch(criteria), "", JSON_ONLY]
     return "\n".join(sections)
+
+
+def _schema_sketch(criteria: tuple[JudgeCriterion, ...]) -> str:
+    """Describe the expected object for rungs with no schema enforcement."""
+    fields = ", ".join(
+        f'"{c.id}": {{"score": <{c.scale[0]}-{c.scale[1]}>, "justification": "..."}}'
+        for c in criteria
+    )
+    return "Reply with this object: {" + fields + "}"
 
 
 def build_judge_schema(criteria: tuple[JudgeCriterion, ...]) -> dict[str, Any]:
@@ -352,31 +385,41 @@ def build_judge_schema(criteria: tuple[JudgeCriterion, ...]) -> dict[str, Any]:
     }
 
 
-def build_judge_request(
+def build_judge_request(  # noqa: PLR0913, PLR0917
     prompt: PromptSpec,
     row: SampleRow,
     criteria: tuple[JudgeCriterion, ...],
     settings: JudgeSettings,
     case_vars: dict[str, Any] | None = None,
+    rung: Rung = "strict",
 ) -> dict[str, Any]:
     """Build the full chat-completions body for one judge call."""
     system = settings.persona
     if prompt.rubric.judge_instructions:
         system = f"{system}\n\n{prompt.rubric.judge_instructions.strip()}"
-    return {
+    body: dict[str, Any] = {
         "model": settings.model,
         "messages": [
             {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": build_judge_prompt(
-                    prompt, row, criteria, settings, case_vars
+                    prompt,
+                    row,
+                    criteria,
+                    settings,
+                    case_vars,
+                    json_only=rung != "strict",
                 ),
             },
         ],
         "temperature": settings.temperature,
-        "response_format": build_judge_schema(criteria),
     }
+    if rung == "strict":
+        body["response_format"] = build_judge_schema(criteria)
+    elif rung == "json_object":
+        body["response_format"] = {"type": "json_object"}
+    return body
 
 
 def parse_judge_response(
@@ -484,6 +527,18 @@ def failure_rows(
     ]
 
 
+class _UnsupportedFormatError(Exception):
+    """The endpoint refused this response format, so try a weaker one."""
+
+
+def _rejects_format(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in UNSUPPORTED_MARKERS)
+
+
+MAX_DOWNGRADES = 2
+
+
 class JudgeScorer:
     """Grades samples with the judge model.
 
@@ -501,6 +556,8 @@ class JudgeScorer:
         self._prompt = prompt
         self._settings = settings
         self._on_raw = on_raw
+        self._rung = settings.structured_output
+        self._downgrades = 0
         self.cost = 0.0
         self.parse_retries = 0
 
@@ -515,7 +572,11 @@ class JudgeScorer:
         """Make one judge call. Return rows, or ``None`` if it must be retried."""
         try:
             raw = await self._client.complete(body)
-        except (RetryableError, FatalAPIError) as exc:
+        except FatalAPIError as exc:
+            if self._rung != RUNGS[-1] and _rejects_format(str(exc)):
+                raise _UnsupportedFormatError(str(exc)) from None
+            return failure_rows(row, criteria, repeat, f"judge call failed: {exc}")
+        except RetryableError as exc:
             return failure_rows(row, criteria, repeat, f"judge call failed: {exc}")
 
         self.cost += float((raw.get("usage") or {}).get("cost") or 0.0)
@@ -524,6 +585,15 @@ class JudgeScorer:
 
         rows = parse_judge_response(raw, row, criteria, repeat)
         return rows if all(r.applicable for r in rows) else None
+
+    def _lower_rung(self) -> bool:
+        """Drop to a less demanding response format. Returns False at the floor."""
+        index = RUNGS.index(self._rung)
+        if index + 1 >= len(RUNGS) or self._downgrades >= MAX_DOWNGRADES:
+            return False
+        self._rung = RUNGS[index + 1]
+        self._downgrades += 1
+        return True
 
     async def score(
         self, row: SampleRow, case_vars: dict[str, Any] | None = None
@@ -534,16 +604,37 @@ class JudgeScorer:
         if not gradeable:
             return rows
 
-        body = build_judge_request(
-            self._prompt, row, gradeable, self._settings, case_vars
-        )
         for repeat in range(self._settings.repeats):
-            for attempt in range(self._settings.parse_retries + 1):
-                scored = await self._attempt(body, row, gradeable, repeat, attempt)
+            attempt = 0
+            while attempt <= self._settings.parse_retries:
+                body = build_judge_request(
+                    self._prompt,
+                    row,
+                    gradeable,
+                    self._settings,
+                    case_vars,
+                    rung=self._rung,
+                )
+                try:
+                    scored = await self._attempt(body, row, gradeable, repeat, attempt)
+                except _UnsupportedFormatError as exc:
+                    if self._lower_rung():
+                        # A downgrade is not a parse failure. Counting it as an
+                        # attempt means parse_retries of 0 never reaches the
+                        # rung that works.
+                        continue
+                    rows += failure_rows(
+                        row,
+                        gradeable,
+                        repeat,
+                        f"judge rejected every response format: {exc}",
+                    )
+                    break
                 if scored is not None:
                     rows += scored
                     break
                 self.parse_retries += 1
+                attempt += 1
             else:
                 rows += failure_rows(
                     row,
