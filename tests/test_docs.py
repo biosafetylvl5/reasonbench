@@ -1,4 +1,4 @@
-"""Documentation that drifts from the code is worse than none."""
+"""Checks the docs against the code."""
 
 from __future__ import annotations
 

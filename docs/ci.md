@@ -71,7 +71,20 @@ base_url: http://localhost:11434/v1   # Ollama
 ```
 
 Traces are read from `reasoning_details`, `reasoning_content`, `reasoning`,
-`thinking`, and Anthropic-style thinking content parts.
+`thinking`, and Anthropic-style thinking content parts. Every shape is tried,
+whatever the endpoint is configured as.
 
-`budget_usd` needs `usage.cost` in the response. Most of these servers omit
-it; see [exit-codes.md](exit-codes.md).
+`reasoning_effort` is sent as `reasoning: {effort}` on OpenRouter,
+`reasoning_effort` on OpenAI, and `chat_template_kwargs.enable_thinking`
+elsewhere. Set `dialect` to override the guess. A level the endpoint cannot
+express is an error; `on_unsupported_effort` can `downgrade` or `omit` it
+instead. `--dry-run` reports levels that end up sending the same request.
+
+The judge asks for a strict JSON schema, then `json_object`, then plain JSON,
+dropping a rung when the server rejects the format. Set
+`judge.structured_output` to start lower.
+
+`budget_usd` needs a price when the server omits `usage.cost`; see
+[exit-codes.md](exit-codes.md).
+
+The key is checked once before the sweep. `--no-preflight` skips it.

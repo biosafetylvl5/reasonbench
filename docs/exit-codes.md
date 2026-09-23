@@ -29,6 +29,19 @@ Spending is checked after each sample commits, so up to `max_concurrency`
 requests may already be in flight when the cap trips. Set `budget_usd` to
 roughly 0.7 of the true ceiling.
 
-A server that does not report `usage.cost` leaves the cap unenforced. Most
-OpenAI-compatible endpoints other than OpenRouter do not report it; bound
-those runs with `max_samples`.
+Only OpenRouter reports `usage.cost`. Elsewhere, give the models a price:
+
+```yaml
+pricing:
+  per_mtok:
+    "gpt-5.2": {prompt: 1.25, completion: 10.0}
+    "*": {prompt: 0.0, completion: 0.0}
+```
+
+Reasoning tokens are counted inside `completion_tokens`, and cached tokens
+inside `prompt_tokens`, so neither is billed twice. Set `reasoning` on a price
+entry only where a provider bills them separately.
+
+In CI an unpriced model exits 2 before the first call. Outside CI it runs with
+the cap unenforced. `require_pricing` overrides both. `max_total_tokens` bounds
+a run whose cost is genuinely zero, and exits 12 like the other caps.
