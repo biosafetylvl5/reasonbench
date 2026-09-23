@@ -21,6 +21,7 @@ from tenacity import (
 )
 
 from reasonbench.config import Attachment, Frozen, PromptSpec, RunConfig, Variant
+from reasonbench.dialects import effort_body, infer
 from reasonbench.sweep import Sample
 
 if TYPE_CHECKING:
@@ -155,10 +156,9 @@ def build_request(
 ) -> dict[str, Any]:
     """Return the JSON body for one sample's chat-completions call.
 
-    ``reasoning_effort`` of ``None`` omits the parameter entirely; the literal
-    string ``"none"`` sends an explicit request to disable reasoning.
-    OpenRouter normalizes ``effort`` per provider, so no per-model handling is
-    needed here.
+    ``reasoning_effort`` of ``None`` omits the parameter; the literal string
+    ``"none"`` asks the server to disable reasoning. Which parameter carries
+    it depends on the endpoint, so that mapping lives in ``dialects``.
     """
     variant = next(v for v in prompt.variants if v.id == sample.variant_id)
     body: dict[str, Any] = {
@@ -167,8 +167,13 @@ def build_request(
         "temperature": sample.temperature,
         "max_tokens": config.max_tokens,
     }
-    if sample.reasoning_effort is not None:
-        body["reasoning"] = {"effort": sample.reasoning_effort, "exclude": False}
+    fragment, _ = effort_body(
+        infer(config),
+        sample.reasoning_effort,
+        on_unsupported=config.on_unsupported_effort,
+        thinking_param=config.thinking_param,
+    )
+    body.update(fragment)
     return body
 
 

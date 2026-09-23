@@ -24,6 +24,7 @@ from reasonbench.config import (
     load_run_config,
 )
 from reasonbench.dataset import CaseSet, load_cases
+from reasonbench.dialects import check_efforts
 from reasonbench.errors import (
     AmbiguousSampleError,
     ArtifactNotFoundError,
@@ -381,6 +382,9 @@ def run(
     prompt = load_prompt(prompt_yaml)
     cases = load_cases(prompt, prompt_yaml, limit=max_cases)
 
+    check_pricing(config, config.models, in_ci=_in_ci())
+    for note in check_efforts(config):
+        ui.warn("reasoning_effort: {}", note)
     samples = expand(config, prompt, cases)
     if len(samples) > config.max_samples:
         raise UsageError(
@@ -402,7 +406,6 @@ def run(
         ui.status("--dry-run: no API calls made")
         return
 
-    check_pricing(config, config.models, in_ci=_in_ci())
     api_key = Settings.resolve()
     run_dir = resume or new_run_dir(out, label or prompt.id, run_id=run_id)
     with RunStore(run_dir, create=resume is None) as store:
@@ -994,6 +997,8 @@ def eval_cmd(
             hint="narrow with --max-cases, fewer axes, or raise max_samples.",
         )
     check_pricing(config, config.models, in_ci=_in_ci())
+    for note in check_efforts(config):
+        ui.warn("reasoning_effort: {}", note)
     api_key = Settings.resolve()
 
     run_dir = new_run_dir(out, prompt.id, run_id=run_id)

@@ -22,6 +22,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from reasonbench.errors import ConfigError, MissingAPIKeyError
 
+ThinkingParam = Literal["auto", "chat_template_kwargs", "reasoning_effort", "none"]
+
 KEY_FILENAME = "openrouter.key"
 
 # A cell value only reaches a regex through `re_escape`; without it a decimal
@@ -406,6 +408,11 @@ class RunConfig(Frozen):
     reports_cost: bool | None = None
     pricing: Pricing = Field(default_factory=Pricing)
     require_pricing: bool | None = None
+    dialect: Literal["openrouter", "openai", "generic"] | None = None
+    on_unsupported_effort: Literal["error", "downgrade", "omit"] = "error"
+    thinking_param: Literal[
+        "auto", "chat_template_kwargs", "reasoning_effort", "none"
+    ] = "auto"
     judge: JudgeSettings
 
     @model_validator(mode="after")
