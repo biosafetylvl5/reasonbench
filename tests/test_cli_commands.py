@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
+import httpx
 import pytest
+import respx
+import yaml
 from conftest import load_fixture, make_sample
 from typer.testing import CliRunner
 
@@ -131,3 +135,39 @@ def test_raw_writes_the_artifact_byte_for_byte(runner, scored_run):
     result = runner.invoke(app, ["raw", str(scored_run), "s1"])
     assert result.exit_code == ExitCode.OK
     assert result.stdout == artifact.read_text(encoding="utf-8")
+
+
+def test_score_with_another_judge_records_it_in_the_manifest(
+    runner, scored_run, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    payload = {"sound_reasoning": {"score": 4, "justification": "ok"}}
+    with respx.mock:
+        route = respx.post("http://judge.test/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(payload)}}]}
+            )
+        )
+        result = runner.invoke(
+            app,
+            [
+                "score",
+                str(scored_run),
+                "--judge-model",
+                "judge/y",
+                "--judge-base-url",
+                "http://judge.test/v1",
+            ],
+        )
+    assert result.exit_code == ExitCode.OK, result.output
+    assert json.loads(route.calls.last.request.content)["model"] == "judge/y"
+    manifest = yaml.safe_load((scored_run / "manifest.yaml").read_text())
+    assert manifest["run_config"]["judge"]["model"] == "judge/y"
+    assert manifest["run_config"]["judge"]["base_url"] == "http://judge.test/v1"
+
+
+def test_judge_override_with_deterministic_only_is_a_usage_error(runner, scored_run):
+    result = runner.invoke(
+        app, ["score", str(scored_run), "--only", "deterministic", "--judge-model", "x"]
+    )
+    assert result.exit_code == ExitCode.USAGE

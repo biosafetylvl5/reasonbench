@@ -376,6 +376,9 @@ class JudgeSettings(Frozen):
     """How the judge is invoked. Task-specific wording lives in the rubric."""
 
     model: str
+    # Where the judge is served, when not where the run was generated: a local
+    # sweep judged on OpenRouter, or imported outputs that were never generated.
+    base_url: str | None = None
     temperature: float = 0.0
     repeats: int = Field(default=1, ge=1)
     blind: bool = True

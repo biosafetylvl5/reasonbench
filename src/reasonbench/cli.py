@@ -511,7 +511,7 @@ async def _judge_all(
         max_concurrency=config.max_concurrency,
         max_retries=config.max_retries,
         timeout_s=config.timeout_s,
-        base_url=_base_url(config),
+        base_url=config.judge.base_url or _base_url(config),
     ) as client:
         scorer = JudgeScorer(client, prompt, config.judge, on_raw=store.save_judge_raw)
         lookup = case_vars or {}
@@ -538,12 +538,24 @@ def score(
     only: Annotated[
         str, typer.Option("--only", help="all, deterministic, or judge.")
     ] = "all",
+    judge_model: Annotated[
+        str | None,
+        typer.Option("--judge-model", help="Judge with this model instead."),
+    ] = None,
+    judge_base_url: Annotated[
+        str | None,
+        typer.Option("--judge-base-url", help="Endpoint serving the judge."),
+    ] = None,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = 0,
     no_color: NoColorOpt = False,
     yes: YesOpt = False,
 ) -> None:
-    """Apply the rubric to a stored run. Makes no generation calls."""
+    """Apply the rubric to a stored run. Makes no generation calls.
+
+    A run directory holds one judge's scores. To compare judges, copy the
+    directory once per judge and score each copy with ``--judge-model``.
+    """
     ui.configure(quiet=quiet, verbose=verbose, no_color=no_color, yes=yes)
     if only not in {"all", "deterministic", "judge"}:
         raise UsageError(f"--only must be all, deterministic or judge, not {only!r}")
@@ -552,6 +564,17 @@ def score(
 
     prompt = load_prompt(prompt_yaml) if prompt_yaml else _manifest_prompt(run_dir)
     config = _manifest_config(run_dir)
+    overrides = {
+        key: value
+        for key, value in (("model", judge_model), ("base_url", judge_base_url))
+        if value is not None
+    }
+    if overrides and only == "deterministic":
+        raise UsageError("--judge-model and --judge-base-url need the judge to run")
+    if overrides:
+        config = config.model_copy(
+            update={"judge": config.judge.model_copy(update=overrides)}
+        )
 
     # Resolve the key before anything is deleted: scoring without one used to
     # wipe the stored judge scores and only then report the missing key.
@@ -583,6 +606,12 @@ def score(
             _judge_all(prompt, config, store, api_key or "", case_vars)
         )
         store.add_scores(judged)
+        if overrides:
+            # The manifest names the judge behind the stored scores, so it
+            # follows the scores rather than the run that made the samples.
+            manifest = _load_manifest(run_dir)
+            manifest["run_config"]["judge"] = config.judge.model_dump(mode="json")
+            store.write_manifest(manifest)
         ui.status(
             "scored {} judge criteria with {} (${:.4f})",
             len(judged),

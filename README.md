@@ -33,6 +33,16 @@ reasonbench report runs/<dir> --group-by model,variant_id
 
 Re-scoring a stored run costs judge tokens only.
 
+The judge comes from the run's `models.yaml`, and is served from the run's
+endpoint unless `judge.base_url` names another. `score --judge-model` and
+`--judge-base-url` swap it for one scoring, and the manifest then records the
+new judge. A run directory holds one judge's scores, so to compare judges,
+copy the directory once per judge.
+
+Outputs made elsewhere can be graded too, by importing them as a run
+directory. [docs/lsr-ai-evaluation.md](docs/lsr-ai-evaluation.md) does this
+for LSR-AI's storm-report logs.
+
 ```bash
 reasonbench ls                                   # run directories, newest first
 reasonbench show runs/<dir> <sample-id-prefix>   # trace, answer, scores
