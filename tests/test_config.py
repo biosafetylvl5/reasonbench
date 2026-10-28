@@ -44,9 +44,10 @@ def test_unknown_key_is_rejected():
         )
 
 
-def test_empty_model_list_is_rejected():
-    with pytest.raises(ValueError, match="must not be empty"):
-        RunConfig.model_validate({"models": [], "judge": {"model": "j"}})
+def test_models_may_be_omitted_for_recorded_responses():
+    """`run` and `eval` reject an empty list unless the dataset is recorded."""
+    config = RunConfig.model_validate({"judge": {"model": "j"}})
+    assert config.models == ()
 
 
 def test_duplicate_models_are_rejected():

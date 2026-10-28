@@ -1,0 +1,16 @@
+# Judge settings for grading recorded LSR-AI responses with Jev, TypeSafe's
+# decisions model. No models are listed: every response is recorded in the
+# prompt's dataset, so nothing is generated.
+#
+#   reasonbench run configs/lsr-jev.yaml configs/prompts/lsr-verification.yaml \
+#       --label lsr-ai-jev
+#   reasonbench score runs/<dir>
+version: 1
+
+max_concurrency: 4
+
+judge:
+  model: typesafe/jev-1.14
+  api: decisions      # Jev answers Score questions, not chat completions
+  repeats: 3
+  max_chars: 20000

@@ -67,6 +67,37 @@ attachment and does not appear in the rendered prompt.
 
 Only the reference, size and digest are stored in the run database.
 
+## Recorded responses
+
+Responses made elsewhere, by a system ReasonBench cannot call, can be graded
+by recording them in the dataset. Name the columns under `recorded`:
+
+```yaml
+dataset:
+  path: ../../data/lsr-ai/cases.jsonl
+  required_columns: [report_message, expected]
+  recorded:
+    output: output         # the final answer (required in every row)
+    reasoning: reasoning   # the trace; omit or leave a cell empty for none
+    model: model           # optional: which system made it
+    variant: mutation      # optional: a label to group by
+```
+
+`reasonbench run` then stores one sample per row and calls no model. The
+models config needs no `models`, only the judge, and `--resume` does not
+apply. The sample id is the `case_id`, so it must be letters, digits, `.`,
+`_` or `-`. The output and reasoning columns are not template variables. The
+model and variant columns stay available as variables.
+
+The prompt's first variant renders the question the judge sees. A variant
+label that names no variant borrows that template, so labels such as
+`original` and `wrong_number` need no variant of their own. The stored
+manifest lists them, so `report --group-by variant_id` splits results by
+label.
+
+`reasonbench eval` works too: it stores the responses, scores them, and
+checks the gate.
+
 ## What ends up in the run
 
 `case_id` becomes a sample field, so `--group-by case_id` works, and JUnit

@@ -53,9 +53,16 @@ from reasonbench.pricing import (
     price_usage,
     requires_pricing,
 )
+from reasonbench.recorded import (
+    is_recorded,
+    recorded_prompt,
+    recorded_result,
+    recorded_samples,
+)
 from reasonbench.scoring import (
     JudgeScorer,
     aggregate,
+    check_decisions_rubric,
     collapse_judge_repeats,
     score_sample_deterministic,
 )
@@ -277,17 +284,25 @@ def _raise_for_outcome(
         )
 
 
-async def _preflight(config: RunConfig, api_key: str) -> None:
-    """Reject a bad key before the sweep, not after every sample fails."""
+async def _preflight(config: RunConfig, api_key: str, *, judge: bool = False) -> None:
+    """Reject a bad key before the sweep, not after every sample fails.
+
+    With ``judge``, check the judge's endpoint instead: a recorded run calls
+    nothing else.
+    """
+    if judge:
+        base_url, model = _judge_base_url(config), config.judge.model
+    else:
+        base_url, model = _base_url(config), config.models[0]
     async with OpenRouterClient(
         api_key,
         max_concurrency=1,
         max_retries=0,
         timeout_s=min(config.timeout_s, 30.0),
-        base_url=_base_url(config),
+        base_url=base_url,
     ) as client:
         try:
-            await client.preflight(config.models[0])
+            await client.preflight(model)
         except AuthError as exc:
             raise MissingAPIKeyError(
                 f"the endpoint rejected this key: {exc}",
@@ -442,6 +457,15 @@ def run(
     prompt = load_prompt(prompt_yaml)
     cases = load_cases(prompt, prompt_yaml, limit=max_cases)
 
+    if is_recorded(prompt):
+        if resume is not None:
+            raise UsageError("--resume does not apply to recorded responses")
+        _run_recorded(
+            config, prompt, cases, dry_run=dry_run, root=out, label=label, run_id=run_id
+        )
+        return
+    _require_models(config)
+
     check_pricing(config, config.models, in_ci=_in_ci())
     for note in check_efforts(config):
         ui.warn("reasoning_effort: {}", note)
@@ -498,6 +522,70 @@ def run(
         _raise_for_outcome(outcome, config, allow_failures, spent=store.total_cost())
 
 
+def _require_models(config: RunConfig) -> None:
+    if not config.models:
+        raise UsageError(
+            "models list must not be empty",
+            hint="only a prompt whose dataset sets `recorded` needs no models.",
+        )
+
+
+def _recorded_cases(prompt: PromptSpec, cases: CaseSet | None) -> CaseSet:
+    if cases is None:  # pragma: no cover - a recorded prompt has a dataset
+        raise UsageError(f"prompt {prompt.id!r} has no dataset")
+    return cases
+
+
+def _store_recorded(
+    config: RunConfig, prompt: PromptSpec, cases: CaseSet, run_dir: Path
+) -> int:
+    """Store every recorded response in ``run_dir`` and return how many."""
+    prompt = recorded_prompt(prompt, cases)
+    samples = recorded_samples(prompt, cases)
+    # The manifest names the models behind the samples, as for a generated run.
+    config = config.model_copy(
+        update={"models": tuple(sorted({s.model for s in samples}))}
+    )
+    by_id = {c.case_id: c for c in cases.cases}
+    with RunStore(run_dir, create=True) as store:
+        store.write_manifest(_manifest(config, prompt))
+        store.write_cases(cases.cases)
+        for sample in samples:
+            store.add_sample(
+                *recorded_result(sample, by_id[sample.case_id], cases.path)
+            )
+    return len(samples)
+
+
+def _run_recorded(
+    config: RunConfig,
+    prompt: PromptSpec,
+    cases: CaseSet | None,
+    *,
+    dry_run: bool,
+    root: Path,
+    label: str | None,
+    run_id: str | None,
+) -> None:
+    """Store a recorded prompt's responses as a new run. Calls no model."""
+    recorded = _recorded_cases(prompt, cases)
+    ui.status(
+        "dataset {}: {} recorded responses; nothing is generated",
+        recorded.path,
+        len(recorded.cases),
+    )
+    if dry_run:
+        ui.status("--dry-run: nothing stored")
+        return
+    run_dir = new_run_dir(root, label or prompt.id, run_id=run_id)
+    _store_recorded(config, prompt, recorded, run_dir)
+    ui.status("wrote {}\n  next: reasonbench score {}", run_dir, run_dir)
+
+
+def _judge_base_url(config: RunConfig) -> str:
+    return config.judge.base_url or _base_url(config)
+
+
 async def _judge_all(
     prompt: PromptSpec,
     config: RunConfig,
@@ -511,7 +599,7 @@ async def _judge_all(
         max_concurrency=config.max_concurrency,
         max_retries=config.max_retries,
         timeout_s=config.timeout_s,
-        base_url=config.judge.base_url or _base_url(config),
+        base_url=_judge_base_url(config),
     ) as client:
         scorer = JudgeScorer(client, prompt, config.judge, on_raw=store.save_judge_raw)
         lookup = case_vars or {}
@@ -546,6 +634,10 @@ def score(
         str | None,
         typer.Option("--judge-base-url", help="Endpoint serving the judge."),
     ] = None,
+    judge_api: Annotated[
+        str | None,
+        typer.Option("--judge-api", help="chat, or decisions for a decisions model."),
+    ] = None,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = 0,
     no_color: NoColorOpt = False,
@@ -559,6 +651,8 @@ def score(
     ui.configure(quiet=quiet, verbose=verbose, no_color=no_color, yes=yes)
     if only not in {"all", "deterministic", "judge"}:
         raise UsageError(f"--only must be all, deterministic or judge, not {only!r}")
+    if judge_api not in {None, "chat", "decisions"}:
+        raise UsageError(f"--judge-api must be chat or decisions, not {judge_api!r}")
     if not run_dir.is_dir():
         raise RunDirError(f"no such run directory: {run_dir}")
 
@@ -566,11 +660,17 @@ def score(
     config = _manifest_config(run_dir)
     overrides = {
         key: value
-        for key, value in (("model", judge_model), ("base_url", judge_base_url))
+        for key, value in (
+            ("model", judge_model),
+            ("base_url", judge_base_url),
+            ("api", judge_api),
+        )
         if value is not None
     }
     if overrides and only == "deterministic":
-        raise UsageError("--judge-model and --judge-base-url need the judge to run")
+        raise UsageError(
+            "--judge-model, --judge-base-url and --judge-api need the judge to run"
+        )
     if overrides:
         config = config.model_copy(
             update={"judge": config.judge.model_copy(update=overrides)}
@@ -580,6 +680,8 @@ def score(
     # wipe the stored judge scores and only then report the missing key.
     wants_judge = only in {"all", "judge"} and bool(prompt.rubric.judge_criteria)
     api_key = Settings.resolve() if wants_judge else None
+    if wants_judge and config.judge.api == "decisions":
+        check_decisions_rubric(prompt.rubric)
 
     with RunStore(run_dir) as store:
         samples = store.samples()
@@ -1069,26 +1171,44 @@ def eval_cmd(
     config = load_run_config(models_yaml)
     prompt = load_prompt(prompt_yaml)
     cases = load_cases(prompt, prompt_yaml, limit=max_cases)
-    samples = expand(config, prompt, cases)
+    recorded = is_recorded(prompt)
+    samples: tuple[Sample, ...] = ()
+    if not recorded:
+        _require_models(config)
+        samples = expand(config, prompt, cases)
     if len(samples) > config.max_samples:
         raise UsageError(
             f"{len(samples)} samples exceeds max_samples ({config.max_samples})",
             hint="narrow with --max-cases, fewer axes, or raise max_samples.",
         )
-    check_pricing(config, config.models, in_ci=_in_ci())
-    for note in check_efforts(config):
-        ui.warn("reasoning_effort: {}", note)
-    api_key = Settings.resolve()
-    if preflight:
-        asyncio.run(_preflight(config, api_key))
+    if not recorded:
+        check_pricing(config, config.models, in_ci=_in_ci())
+        for note in check_efforts(config):
+            ui.warn("reasoning_effort: {}", note)
+    wants_judge = not skip_judge and bool(prompt.rubric.judge_criteria)
+    if wants_judge and config.judge.api == "decisions":
+        check_decisions_rubric(prompt.rubric)
+    api_key = Settings.resolve() if wants_judge or not recorded else ""
+    if preflight and api_key:
+        asyncio.run(_preflight(config, api_key, judge=recorded))
 
     run_dir = new_run_dir(out, prompt.id, run_id=run_id)
     ui.status("run dir: {}", run_dir)
+    if recorded:
+        outcome = RunOutcome()
+        outcome.n_ok = _store_recorded(
+            config, prompt, _recorded_cases(prompt, cases), run_dir
+        )
+        # The stored prompt carries the variants the recorded labels added.
+        prompt = _manifest_prompt(run_dir)
     with RunStore(run_dir, create=True) as store:
-        store.write_manifest(_manifest(config, prompt))
-        if cases is not None:
-            store.write_cases(cases.cases)
-        outcome = asyncio.run(_execute(config, prompt, samples, store, api_key, cases))
+        if not recorded:
+            store.write_manifest(_manifest(config, prompt))
+            if cases is not None:
+                store.write_cases(cases.cases)
+            outcome = asyncio.run(
+                _execute(config, prompt, samples, store, api_key, cases)
+            )
 
         case_vars = store.case_variables()
         store.clear_scores("deterministic")
@@ -1102,7 +1222,7 @@ def eval_cmd(
                 )
             ]
         )
-        if not skip_judge and prompt.rubric.judge_criteria and outcome.n_ok:
+        if wants_judge and outcome.n_ok:
             store.clear_scores("judge")
             judged, cost, _ = asyncio.run(
                 _judge_all(prompt, config, store, api_key, case_vars)

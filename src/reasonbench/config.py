@@ -263,6 +263,19 @@ class CaseSample(Frozen):
     seed: int = 0
 
 
+class RecordedColumns(Frozen):
+    """Columns holding responses made elsewhere, to be graded rather than generated.
+
+    ``output`` and ``reasoning`` are taken out of the case variables. ``model``
+    and ``variant`` stay in them, and also label the sample.
+    """
+
+    output: str = "output"
+    reasoning: str | None = "reasoning"
+    model: str | None = None
+    variant: str | None = None
+
+
 class DatasetSpec(Frozen):
     """Where a prompt's cases live, and how to read them."""
 
@@ -276,6 +289,7 @@ class DatasetSpec(Frozen):
     image_root: str | None = None
     images: tuple[ImageColumn, ...] = ()
     max_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
+    recorded: RecordedColumns | None = None
 
 
 class Variant(Frozen):
@@ -388,6 +402,9 @@ class JudgeSettings(Frozen):
     parse_retries: int = Field(default=2, ge=0)
     # Many OpenAI-compatible servers accept only json_object, or nothing.
     structured_output: Literal["strict", "json_object", "none"] = "strict"
+    # A decisions model, such as typesafe/jev-1.14, does not write text: it is
+    # asked one Score question per criterion on the Decisions API.
+    api: Literal["chat", "decisions"] = "chat"
     persona: str = (
         "You are a strict, impartial grader assessing the quality of a language "
         "model's reasoning and final answer."
@@ -398,7 +415,8 @@ class RunConfig(Frozen):
     """The whole of ``models.yaml``."""
 
     version: int = 1
-    models: tuple[str, ...]
+    # Empty only when every response is recorded in the prompt's dataset.
+    models: tuple[str, ...] = ()
     sweep: SweepAxes = Field(default_factory=SweepAxes)
     max_tokens: int = Field(default=8000, ge=1)
     max_concurrency: int = Field(default=8, ge=1)
@@ -422,8 +440,6 @@ class RunConfig(Frozen):
 
     @model_validator(mode="after")
     def _require_models(self) -> Self:
-        if not self.models:
-            raise ValueError("models list must not be empty")
         duplicates = {m for m in self.models if self.models.count(m) > 1}
         if duplicates:
             raise ValueError(f"duplicate model slugs: {sorted(duplicates)}")

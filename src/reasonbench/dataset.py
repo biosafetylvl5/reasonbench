@@ -13,6 +13,7 @@ import hashlib
 import json
 import mimetypes
 import random
+import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -23,9 +24,18 @@ from reasonbench.errors import ConfigError
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from reasonbench.config import DatasetSpec, ImageColumn, PromptSpec
+    from reasonbench.config import (
+        DatasetSpec,
+        ImageColumn,
+        PromptSpec,
+        RecordedColumns,
+    )
 
 MAX_TOTAL_INLINE_BYTES = 64 * 1024 * 1024
+# The model a recorded response is attributed to when no column names one.
+RECORDED_MODEL = "recorded"
+# A recorded case id is also its sample id, which names files in the run.
+SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class CaseImage(Frozen):
@@ -49,6 +59,15 @@ class CaseImage(Frozen):
         return self.media_type == "application/pdf"
 
 
+class RecordedResponse(Frozen):
+    """A response to one case that was made elsewhere."""
+
+    output: str
+    reasoning: str | None = None
+    model: str = RECORDED_MODEL
+    variant: str | None = None
+
+
 class Case(Frozen):
     """One row of a dataset."""
 
@@ -58,6 +77,7 @@ class Case(Frozen):
     variables: dict[str, Any] = Field(default_factory=dict)
     images: tuple[CaseImage, ...] = ()
     digest: str = ""
+    recorded: RecordedResponse | None = None
 
 
 class CaseSet(Frozen):
@@ -145,6 +165,32 @@ def _resolve_image(
     )
 
 
+def _recorded(
+    columns: RecordedColumns, obj: dict[str, Any], case_id: str
+) -> RecordedResponse:
+    """Read one row's recorded response, failing on a missing answer."""
+    if not SAFE_ID.match(case_id):
+        raise ConfigError(
+            f"case id {case_id!r} cannot name a recorded sample",
+            hint="use letters, digits, '.', '_' and '-' only.",
+        )
+    output = obj.get(columns.output)
+    if not isinstance(output, str):
+        raise ConfigError(
+            f"case {case_id!r}: recorded output column {columns.output!r} "
+            "is missing or not text",
+        )
+    reasoning = obj.get(columns.reasoning) if columns.reasoning else None
+    model = obj.get(columns.model) if columns.model else None
+    variant = obj.get(columns.variant) if columns.variant else None
+    return RecordedResponse(
+        output=output,
+        reasoning=str(reasoning) if reasoning else None,
+        model=str(model) if model else RECORDED_MODEL,
+        variant=str(variant) if variant else None,
+    )
+
+
 def _select(
     rows: list[tuple[int, dict[str, Any]]],
     spec: DatasetSpec,
@@ -218,9 +264,14 @@ def load_cases(
                 f"selected cases inline {total} bytes of images, over the "
                 f"{MAX_TOTAL_INLINE_BYTES} byte cap; narrow with dataset.limit",
             )
-        variables = {
-            k: v for k, v in obj.items() if k not in {c.column for c in spec.images}
-        }
+        recorded = _recorded(spec.recorded, obj, case_id) if spec.recorded else None
+        # A recorded answer is what gets graded, not something to template in.
+        dropped = {c.column for c in spec.images}
+        if spec.recorded:
+            dropped.add(spec.recorded.output)
+            if spec.recorded.reasoning:
+                dropped.add(spec.recorded.reasoning)
+        variables = {k: v for k, v in obj.items() if k not in dropped}
         payload = json.dumps(
             {"vars": variables, "images": [i.sha256 for i in images]},
             sort_keys=True,
@@ -234,6 +285,7 @@ def load_cases(
                 variables=variables,
                 images=tuple(images),
                 digest=hashlib.sha256(payload.encode()).hexdigest()[:12],
+                recorded=recorded,
             )
         )
 

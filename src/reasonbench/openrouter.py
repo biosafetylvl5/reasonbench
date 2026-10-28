@@ -30,8 +30,9 @@ if TYPE_CHECKING:
     from reasonbench.dataset import Case
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-# Kept as a module constant: the test suite routes respx on it.
+# Kept as module constants: the test suite routes respx on them.
 API_URL = f"{DEFAULT_BASE_URL}/chat/completions"
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 # 402 is payment required: a valid key with nothing left to spend.
 AUTH_STATUS = frozenset({401, 402, 403})
@@ -340,6 +341,15 @@ def parse_response(
     )
 
 
+def decisions_url(base_url: str) -> str:
+    """Return the Decisions endpoint beside a chat-completions base URL.
+
+    OpenRouter serves it at ``/api/alpha/decisions``, next to ``/api/v1``.
+    """
+    root = base_url.rstrip("/").removesuffix("/v1")
+    return f"{root}/alpha/decisions"
+
+
 class OpenRouterClient:
     """Async OpenRouter client with bounded concurrency and retries."""
 
@@ -359,6 +369,7 @@ class OpenRouterClient:
         }
         self._base = base_url.rstrip("/")
         self._url = f"{self._base}/chat/completions"
+        self._decisions_url = decisions_url(self._base)
         self._timeout = timeout_s
         self._max_retries = max_retries
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -381,12 +392,12 @@ class OpenRouterClient:
             await self._client.aclose()
             self._client = None
 
-    async def _post_once(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _post_once(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
         """Issue a single POST, mapping transient failures to retryable errors."""
         if self._client is None:
             raise RuntimeError("OpenRouterClient must be used as a context manager")
         try:
-            response = await self._client.post(self._url, json=body)
+            response = await self._client.post(url, json=body)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise RetryableError(f"transport error: {exc}") from exc
 
@@ -399,7 +410,9 @@ class OpenRouterClient:
 
         payload: dict[str, Any] = response.json()
         # OpenRouter can return a 200 whose body carries an error object.
-        if payload.get("error") and not payload.get("choices"):
+        if payload.get("error") and not (
+            payload.get("choices") or payload.get("answers")
+        ):
             message = str(payload["error"])
             # No machine-readable retryability flag on this path, so match the text.
             if any(s in message for s in ("rate", "429", "timeout", "overload")):
@@ -409,6 +422,13 @@ class OpenRouterClient:
 
     async def complete(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST a chat-completions request, retrying transient failures."""
+        return await self._post(self._url, body)
+
+    async def decide(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST a Decisions request, retrying transient failures."""
+        return await self._post(self._decisions_url, body)
+
+    async def _post(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
         async with self._semaphore:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self._max_retries + 1),
@@ -417,7 +437,7 @@ class OpenRouterClient:
                 reraise=True,
             ):
                 with attempt:
-                    return await self._post_once(body)
+                    return await self._post_once(url, body)
         raise FatalAPIError("retry loop exited without a result")  # pragma: no cover
 
     async def preflight(self, model: str) -> None:

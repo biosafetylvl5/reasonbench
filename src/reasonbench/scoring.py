@@ -63,6 +63,13 @@ UNSUPPORTED_MARKERS = (
 Rung = Literal["strict", "json_object", "none"]
 RUNGS: tuple[Rung, ...] = ("strict", "json_object", "none")
 
+# The Decisions API takes at most ten levels per Score question.
+MAX_DECISION_LEVELS = 10
+# Level probabilities below this are left out of the stored justification.
+MIN_REPORTED_P = 0.01
+# How OpenRouter says a model only answers on the Decisions API.
+DECISIONS_ONLY_MARKER = "decisions model"
+
 JSON_ONLY = "Reply with a single JSON object and nothing else. No prose, no code fence."
 
 TARGET_WORDING = {
@@ -422,6 +429,52 @@ def build_judge_request(  # noqa: PLR0913, PLR0917
     return body
 
 
+def _score_row(
+    row: SampleRow,
+    criterion: JudgeCriterion,
+    judge_repeat: int,
+    raw_score: Any,
+    justification: str,
+) -> ScoreRow:
+    """Turn one criterion's raw score into a row, clamped to the scale."""
+    low, high = criterion.scale
+    clamped = False
+    if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
+        # bool is an int subclass, so {"score": true} would otherwise be 1.0.
+        score, normalized = None, None
+        applicable, reason = False, "judge returned no score for this criterion"
+    elif not math.isfinite(float(raw_score)):
+        score, normalized = None, None
+        applicable = False
+        reason = f"judge returned a non-finite score ({raw_score!r})"
+    else:
+        score = float(raw_score)
+        bounded = min(max(score, float(low)), float(high))
+        clamped = bounded != score
+        normalized = (bounded - low) / (high - low)
+        applicable, reason = True, justification
+        if clamped:
+            # Unclamped this lands outside 0-1 and silently moves every
+            # weighted mean the sample contributes to.
+            reason = (
+                f"judge returned {score:g}, outside scale {low}-{high}; "
+                f"clamped to {bounded:g}. {reason}"
+            )
+    return ScoreRow(
+        sample_id=row.sample_id,
+        criterion_id=criterion.id,
+        judge_repeat=judge_repeat,
+        kind="judge",
+        target=str(criterion.target),
+        weight=criterion.weight,
+        score=score,
+        normalized=normalized,
+        applicable=applicable,
+        reason=reason,
+        clamped=clamped,
+    )
+
+
 def parse_judge_response(
     raw: dict[str, Any],
     row: SampleRow,
@@ -438,44 +491,150 @@ def parse_judge_response(
     rows = []
     for criterion in criteria:
         entry = parsed.get(criterion.id) or {}
-        raw_score = entry.get("score")
-        low, high = criterion.scale
-        clamped = False
-        if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
-            # bool is an int subclass, so {"score": true} would otherwise be 1.0.
-            score, normalized = None, None
-            applicable, reason = False, "judge returned no score for this criterion"
-        elif not math.isfinite(float(raw_score)):
-            score, normalized = None, None
-            applicable = False
-            reason = f"judge returned a non-finite score ({raw_score!r})"
-        else:
-            score = float(raw_score)
-            bounded = min(max(score, float(low)), float(high))
-            clamped = bounded != score
-            normalized = (bounded - low) / (high - low)
-            applicable, reason = True, str(entry.get("justification") or "")
-            if clamped:
-                # Unclamped this lands outside 0-1 and silently moves every
-                # weighted mean the sample contributes to.
-                reason = (
-                    f"judge returned {score:g}, outside scale {low}-{high}; "
-                    f"clamped to {bounded:g}. {reason}"
-                )
         rows.append(
-            ScoreRow(
-                sample_id=row.sample_id,
-                criterion_id=criterion.id,
-                judge_repeat=judge_repeat,
-                kind="judge",
-                target=str(criterion.target),
-                weight=criterion.weight,
-                score=score,
-                normalized=normalized,
-                applicable=applicable,
-                reason=reason,
-                clamped=clamped,
-            ),
+            _score_row(
+                row,
+                criterion,
+                judge_repeat,
+                entry.get("score"),
+                str(entry.get("justification") or ""),
+            )
+        )
+    return rows
+
+
+def check_decisions_rubric(rubric: Rubric) -> None:
+    """Fail unless every judge criterion can be asked as a Score question.
+
+    A Score question needs a description for every level, so each point on
+    the scale needs an anchor. Checked before any stored score is dropped.
+    """
+    for criterion in rubric.judge_criteria:
+        low, high = criterion.scale
+        if high - low + 1 > MAX_DECISION_LEVELS:
+            raise ConfigError(
+                f"criterion {criterion.id!r}: a decisions judge takes at most "
+                f"{MAX_DECISION_LEVELS} levels, and scale {low}-{high} has "
+                f"{high - low + 1}",
+            )
+        missing = [
+            s for s in range(low, high + 1) if s not in criterion.guidance.levels
+        ]
+        if missing:
+            raise ConfigError(
+                f"criterion {criterion.id!r}: a decisions judge needs a level "
+                f"for every score, and {missing} have none",
+                hint="add guidance.levels for each score on the scale.",
+            )
+
+
+def _question_instructions(criterion: JudgeCriterion) -> str:
+    guidance = criterion.guidance
+    lines = [guidance.summary.strip(), f"Evaluate {TARGET_WORDING[criterion.target]}."]
+    if guidance.positive_indicators:
+        lines.append(
+            "Evidence that raises the score: "
+            + "; ".join(guidance.positive_indicators)
+            + "."
+        )
+    if guidance.negative_indicators:
+        lines.append(
+            "Evidence that lowers the score: "
+            + "; ".join(guidance.negative_indicators)
+            + "."
+        )
+    if guidance.notes:
+        lines.append(guidance.notes.strip())
+    return "\n".join(lines)
+
+
+def build_decisions_request(
+    prompt: PromptSpec,
+    row: SampleRow,
+    criteria: tuple[JudgeCriterion, ...],
+    settings: JudgeSettings,
+    case_vars: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a Decisions body: one Score question per criterion.
+
+    The response under evaluation is the ``state``. Each criterion's levels,
+    lowest first, are the Score question's ordered ``criteria``, so position
+    ``i`` in the answer is score ``low + i``.
+    """
+    variant = next(v for v in prompt.variants if v.id == row.variant_id)
+    _, question = prompt.render(variant, case_vars)
+    trace = row.readable_reasoning
+    state: dict[str, Any] = {}
+    if prompt.rubric.judge_instructions:
+        state["grading_context"] = prompt.rubric.judge_instructions.strip()
+    state["question"] = question.strip()
+    if not settings.blind:
+        state["model"] = row.model
+    state["reasoning_trace"] = (
+        trace[: settings.max_chars].strip()
+        if trace
+        else "(this model returned no readable reasoning trace)"
+    )
+    state["final_answer"] = row.output[: settings.max_chars].strip() or "(empty)"
+
+    questions = {}
+    for criterion in criteria:
+        resolved = resolve_criterion(criterion, case_vars)
+        low, high = resolved.scale
+        questions[resolved.id] = {
+            "type": "score",
+            "instructions": _question_instructions(resolved),
+            "criteria": [
+                resolved.guidance.levels[s].strip() for s in range(low, high + 1)
+            ],
+        }
+    return {"model": settings.model, "state": state, "questions": questions}
+
+
+def _describe_decision(entry: dict[str, Any], low: int) -> str:
+    """Summarise a Score answer, since a decisions model writes no justification."""
+    probabilities = entry.get("probabilities") or {}
+    likely = sorted(
+        (
+            (float(p), low + int(position))
+            for position, p in probabilities.items()
+            if isinstance(p, int | float) and str(position).isdigit()
+        ),
+        reverse=True,
+    )
+    parts = [f"P({score})={p:.2f}" for p, score in likely if p >= MIN_REPORTED_P]
+    confidence = entry.get("confidence")
+    if isinstance(confidence, int | float):
+        parts.insert(0, f"confidence {confidence:.2f}")
+    return "; ".join(parts)
+
+
+def parse_decisions_response(
+    raw: dict[str, Any],
+    row: SampleRow,
+    criteria: tuple[JudgeCriterion, ...],
+    judge_repeat: int,
+) -> list[ScoreRow]:
+    """Turn a Decisions response into score rows, one per criterion.
+
+    The answer's ``score`` is a probability-weighted position on the levels,
+    so the stored score can fall between two integers.
+    """
+    answers = raw.get("answers") or {}
+    rows = []
+    for criterion in criteria:
+        entry = answers.get(criterion.id) or {}
+        low = criterion.scale[0]
+        position = entry.get("score")
+        raw_score = (
+            low + position
+            if isinstance(position, int | float) and not isinstance(position, bool)
+            else None
+        )
+        rows.append(
+            _score_row(
+                row, criterion, judge_repeat, raw_score, _describe_decision(entry, low)
+            )
         )
     return rows
 
@@ -570,10 +729,22 @@ class JudgeScorer:
         attempt: int,
     ) -> list[ScoreRow] | None:
         """Make one judge call. Return rows, or ``None`` if it must be retried."""
+        decisions = self._settings.api == "decisions"
         try:
-            raw = await self._client.complete(body)
+            if decisions:
+                raw = await self._client.decide(body)
+            else:
+                raw = await self._client.complete(body)
         except FatalAPIError as exc:
-            if self._rung != RUNGS[-1] and _rejects_format(str(exc)):
+            if not decisions and DECISIONS_ONLY_MARKER in str(exc):
+                return failure_rows(
+                    row,
+                    criteria,
+                    repeat,
+                    f"judge call failed: {exc} (set judge.api: decisions, "
+                    "or score with --judge-api decisions)",
+                )
+            if not decisions and self._rung != RUNGS[-1] and _rejects_format(str(exc)):
                 raise _UnsupportedFormatError(str(exc)) from None
             return failure_rows(row, criteria, repeat, f"judge call failed: {exc}")
         except RetryableError as exc:
@@ -583,7 +754,8 @@ class JudgeScorer:
         if self._on_raw is not None:
             self._on_raw(row.sample_id, repeat, attempt, raw)
 
-        rows = parse_judge_response(raw, row, criteria, repeat)
+        parse = parse_decisions_response if decisions else parse_judge_response
+        rows = parse(raw, row, criteria, repeat)
         return rows if all(r.applicable for r in rows) else None
 
     def _lower_rung(self) -> bool:
@@ -607,14 +779,19 @@ class JudgeScorer:
         for repeat in range(self._settings.repeats):
             attempt = 0
             while attempt <= self._settings.parse_retries:
-                body = build_judge_request(
-                    self._prompt,
-                    row,
-                    gradeable,
-                    self._settings,
-                    case_vars,
-                    rung=self._rung,
-                )
+                if self._settings.api == "decisions":
+                    body = build_decisions_request(
+                        self._prompt, row, gradeable, self._settings, case_vars
+                    )
+                else:
+                    body = build_judge_request(
+                        self._prompt,
+                        row,
+                        gradeable,
+                        self._settings,
+                        case_vars,
+                        rung=self._rung,
+                    )
                 try:
                     scored = await self._attempt(body, row, gradeable, repeat, attempt)
                 except _UnsupportedFormatError as exc:

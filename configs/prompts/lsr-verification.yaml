@@ -1,0 +1,220 @@
+# Grades LSR-AI storm-report verifications that were produced elsewhere.
+# Nothing here is sent to a model to generate: the dataset records each
+# response, `reasonbench run` stores them, and `reasonbench score` applies this
+# rubric. scripts/lsr_convert.py writes the dataset.
+#
+# Each row is one log, or a copy of it with a planted flaw from
+# data/lsr-ai/mutations.yaml. The mutation labels the sample's variant, so
+# `report --group-by variant_id` splits results by planted flaw.
+version: 1
+id: lsr-verification
+title: "LSR-AI storm report verification"
+
+system: |
+  You verify a severe-weather storm report against radar data.
+
+dataset:
+  path: ../../data/lsr-ai/cases.jsonl
+  required_columns: [report_message, expected]
+  recorded:
+    output: output
+    reasoning: reasoning
+    model: model
+    variant: mutation
+
+variants:
+  - id: original
+    user: |
+      {{ report_message }}
+
+rubric:
+  judge_instructions: |
+    You are grading LSR-AI, a two-agent system that verifies storm reports.
+    A supervisor agent passes the report to a convective specialist, who calls
+    MRMS radar tools and writes an analysis. The supervisor then gives the
+    final answer as "Event Verification: Yes/No" with notes.
+
+    The "question" is the report exactly as the agents received it. The
+    reasoning trace is the agents' messages in order. Lines starting "→" are
+    tool calls with their arguments; lines starting "←" are the tool results.
+    The tools returned grids of points around the requested location; this
+    evaluation summarised each grid (the value at the nearest point, every
+    value within 1.5 km, the range within 5 and 10 km, and the grid maximum
+    with its distance and direction) because the full grids are too long to
+    show.
+    Treat those summaries as the ground truth the agent saw. An "Empty
+    DataFrame" result means the tool returned no rows: that may be no echoes
+    or missing data.
+
+    Units and codes: MESH is in millimetres (25.4 mm = 1 inch). VIL density is
+    in g/m³. Reflectivity is in dBZ. In the MRMS precipitation flag, 0 is no
+    precipitation and 7 is hail.
+
+    Grade the agents' reasoning and answer, not the report. Do not reward
+    length or confident tone.
+
+  criteria:
+    # --- deterministic -----------------------------------------------------
+    - id: verdict_format
+      kind: deterministic
+      target: output
+      scope: first_line
+      weight: 0.5
+      check:
+        type: regex
+        pattern: '^Event Verification:\s*(Yes|No)\s*$'
+
+    - id: verdict_correct
+      kind: deterministic
+      target: output
+      scope: first_line
+      weight: 3.0
+      check:
+        type: regex
+        pattern: '^Event Verification:\s*{{ expected | re_escape }}\b'
+
+    - id: hail_core_checked
+      kind: deterministic
+      target: reasoning
+      weight: 0.5
+      check:
+        # For a hail report the MESH product is the direct size estimate.
+        type: contains
+        expected: "→ get_mesh("
+
+    # --- judged ------------------------------------------------------------
+    - id: grounded_numbers
+      kind: judge
+      target: both
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does every radar value or product the agents cite match a tool result
+          in the trace?
+        levels:
+          4: "Every cited value matches a tool result, and every product cited was actually fetched."
+          3: "Values match, with a minor imprecision in a range or a rounding."
+          2: "One value is noticeably misquoted, but it does not drive the conclusion."
+          1: "A misquoted value, or a product that was never fetched, supports the conclusion."
+          0: "Several values are invented or contradict the tool results."
+        negative_indicators:
+          - "cites a radar product with no matching tool call"
+          - "quotes a value outside the range the tool returned at that location"
+        notes: >
+          Compare each number against the matching "←" summary. A product is
+          only fetched if there is a "→" call for it.
+
+    - id: internally_consistent
+      kind: judge
+      target: both
+      weight: 1.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Is the analysis free of statements that contradict each other or the
+          conclusion?
+        levels:
+          4: "No contradictions."
+          3: "One loose phrasing that a careful reader resolves easily."
+          2: "One real contradiction about a supporting detail."
+          1: "A contradiction that bears on the conclusion."
+          0: "The conclusion contradicts the analysis."
+        negative_indicators:
+          - "calls a value above a threshold it is actually below"
+          - "states an absence of evidence and then relies on that evidence"
+
+    - id: evidence_supports_verdict
+      kind: judge
+      target: both
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the final verdict follow from the radar evidence in the trace,
+          with the reasoning that connects them stated?
+        levels:
+          4: "The verdict follows from several products, and the link is explained."
+          3: "The verdict follows, but the explanation skips a step."
+          2: "The verdict is plausible but rests on one product or an assertion."
+          1: "The reasoning is mostly assertion, or the evidence points weakly the other way."
+          0: "The verdict contradicts the evidence, or no evidence is given."
+        negative_indicators:
+          - "the final verdict differs from the specialist's conclusion"
+          - "asserts support without naming any value"
+
+    - id: missing_data_handling
+      kind: judge
+      target: reasoning
+      weight: 1.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          When a tool returns nothing, does the agent treat it as missing or
+          ambiguous rather than as evidence?
+        levels:
+          4: "Empty results are acknowledged as ambiguous, or no tool returned empty."
+          3: "Empty results are mostly handled, with slight over-reading."
+          2: "An empty result is read as weak evidence without comment."
+          1: "An empty result is read as confirmation."
+          0: "Several empty results are presented as conclusive evidence."
+        notes: >
+          Score 4 when every tool returned data; this criterion is about empty
+          results only.
+
+    - id: calibrated_confidence
+      kind: judge
+      target: both
+      weight: 1.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Does the stated confidence match the strength and agreement of the
+          evidence presented?
+        levels:
+          4: "Confidence matches the evidence as presented."
+          3: "Slightly over- or under-confident."
+          2: "High confidence with one important gap left unaddressed."
+          1: "High confidence on thin or conflicting evidence."
+          0: "High confidence with no evidence presented."
+
+    - id: faithful_summary
+      kind: judge
+      target: output
+      weight: 1.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Do the supervisor's verdict and notes faithfully report the
+          specialist's conclusion and evidence?
+        levels:
+          4: "Same verdict, and the notes report the specialist's evidence accurately."
+          3: "Same verdict; the notes omit or slightly blur a detail."
+          2: "Same verdict; the notes add or misstate a supporting detail."
+          1: "The notes misrepresent the specialist's main evidence."
+          0: "The verdict differs from the specialist's conclusion."
+        notes: >
+          Compare the final answer with the specialist's last analysis in the
+          trace.
+
+    - id: addresses_report
+      kind: judge
+      target: both
+      weight: 2.0
+      scale: [0, 4]
+      guidance:
+        summary: >
+          Did the agents check the report as stated: its event type, time and
+          location, and its magnitude if the report gives one?
+        levels:
+          4: "Tools were called at the report's time and location, and every stated detail is addressed."
+          3: "Time and location match; a stated magnitude is mentioned but not compared."
+          2: "Time and location match, but a stated magnitude is ignored."
+          1: "The time or location analysed differs from the report."
+          0: "The analysis is of a different time and place, or a different event."
+        negative_indicators:
+          - "tool calls use a date, time, latitude or longitude different from the report"
+          - "a stated hail size is never compared with MESH"
+        notes: >
+          Compare the "→" call arguments with the report text in the question.
+          A report with no magnitude can still score 4.
